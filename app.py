@@ -3,6 +3,7 @@ Ireland SC-DSS -- Multi-Sector Supply Chain Decision Support System
 Version: 4.0 -- Multi-sector (Energy . Agriculture . MedTech)
 Sector-switching with sweep transitions, unique strategic overviews per sector,
 fixed raw-data tab toggles (unique IDs per dashboard).
+(c) 2026 Dr Wael Rashwan & Dr Amr Mahfouz, 3S Group, Maynooth University
 """
 import os, re, math
 import pandas as pd
@@ -11,15 +12,6 @@ import plotly.graph_objects as go
 from dash import Dash, dcc, html, Input, Output, State, dash_table, ctx
 from dash.exceptions import PreventUpdate
 import dash_bootstrap_components as dbc
-from sklearn.ensemble import IsolationForest
-from sklearn.cluster import KMeans
-from sklearn.preprocessing import StandardScaler
-
-# Chart tooltip definitions (fail-safe import — tooltips are optional)
-try:
-    from chart_tooltips import CHART_TOOLTIPS
-except Exception:
-    CHART_TOOLTIPS = {}
 
 # ???????????????????????????????????????????????????????
 # SECTOR THEME TOKENS
@@ -322,80 +314,13 @@ S_PER = seai[seai["flow"]=="Primary Energy Requirement (excl. non-energy)"].sort
 
 YEARS    = sorted(seai["year"].dropna().unique().astype(int).tolist()) if not seai.empty else [2023]
 YEAR_MIN = min(YEARS); YEAR_MAX = max(YEARS)
-# Fuel categories for Energy HHI & concentration metrics.
-# Added coal and renewables (Fix #15) so KPIs reflect full import mix rather
-# than only 94% of it.
-IMP_FUELS = ["oil","natural_gas","electricity","coal","renewables"]
-
-# ── Fuel → HS code families for country-HHI computation ──────────────────────
-# Maps each fuel in IMP_FUELS to HS2/HS4 chapters that represent it in Comtrade.
-# This lets us compute supplier concentration (true HHI) per fuel from
-# country-level import data, not from the fuel-mix shares (Fix #2-B).
-FUEL_HS_PATTERNS = {
-    "oil":          ["2709","2710","2711 19","petroleum","crude","gasoil","kerosene","jet","gasoline","fuel oil","lpg","lubric","bitumen"],
-    "natural_gas":  ["2711 11","2711 21","natural gas","lng"],
-    "coal":         ["2701","2702","2703","2704","coal","coke","lignite","anthracite","peat"],
-    "electricity":  ["2716","electrical","electricity","electric energy"],
-    "renewables":   ["biomass","biofuel","biodiesel","bioethanol","wood pellet","renewable"],
-}
-
-def _matches_fuel(cmddesc, fuel):
-    """Return True if a Comtrade cmddesc row looks like the given fuel category."""
-    if pd.isna(cmddesc): return False
-    v = str(cmddesc).lower()
-    return any(pat.lower() in v for pat in FUEL_HS_PATTERNS.get(fuel, []))
-
+IMP_FUELS = ["oil","natural_gas","electricity"]
 CT_YEARS    = sorted(comtrade["refyear"].unique().astype(int).tolist()) if not comtrade.empty else []
 CT_PARTNERS = sorted(comtrade["partnerdesc"].dropna().unique().tolist()) if not comtrade.empty else []
 CT_YEAR_MAX = max(CT_YEARS) if CT_YEARS else YEAR_MAX
 DEFAULT_YEAR = 2023 if 2023 in YEARS else min(YEAR_MAX, CT_YEAR_MAX)
 SEAI_DROPDOWN_YEARS = sorted([y for y in YEARS if y >= YEAR_MAX-14], reverse=True)
 BOTH_DROPDOWN_YEARS = sorted([y for y in CT_YEARS if y >= CT_YEAR_MAX-14 and y in YEARS], reverse=True) or SEAI_DROPDOWN_YEARS
-
-# ── World Bank Worldwide Governance Indicators (Fix #3-B) ─────────────────────
-# "Political Stability and Absence of Violence" percentile rank (2023 release),
-# rescaled to a 0-1 risk score where HIGHER = MORE RISKY.
-# Rule: risk = 1 - (percentile_rank / 100).
-# Source: World Bank WGI 2024 release (data year 2023). Countries not listed
-# default to 0.5 (median risk, no judgement either way).
-WGI_RISK = {
-    # Very low risk (stable democracies)
-    "Norway": 0.08, "Switzerland": 0.09, "Iceland": 0.06, "Finland": 0.10,
-    "Luxembourg": 0.10, "Denmark": 0.12, "New Zealand": 0.12, "Singapore": 0.14,
-    "Austria": 0.18, "Sweden": 0.18, "Netherlands": 0.19, "Ireland": 0.19,
-    "Canada": 0.22, "Australia": 0.22, "Portugal": 0.22, "Germany": 0.24,
-    "Belgium": 0.26, "Japan": 0.25, "United Kingdom": 0.32, "France": 0.38,
-    "United States": 0.42, "Czechia": 0.20, "Czech Republic": 0.20,
-    "Slovenia": 0.22, "Slovakia": 0.28, "Estonia": 0.20, "Latvia": 0.28,
-    "Lithuania": 0.25, "Spain": 0.32, "Italy": 0.35, "Poland": 0.28,
-    "Hungary": 0.38, "Greece": 0.40, "Malta": 0.20, "Cyprus": 0.35,
-    "Republic of Korea": 0.32, "Rep. of Korea": 0.32, "Taiwan": 0.35,
-    "United Arab Emirates": 0.30, "Qatar": 0.28, "Kuwait": 0.45,
-    "Hong Kong": 0.35, "Bahrain": 0.48, "Oman": 0.40,
-    # Medium risk
-    "Croatia": 0.38, "Bulgaria": 0.45, "Romania": 0.42, "Brazil": 0.55,
-    "Mexico": 0.68, "Argentina": 0.55, "Chile": 0.35, "Uruguay": 0.25,
-    "Morocco": 0.55, "South Africa": 0.62, "Indonesia": 0.58, "Malaysia": 0.45,
-    "Thailand": 0.60, "Vietnam": 0.45, "Philippines": 0.70, "India": 0.68,
-    "China": 0.55, "Saudi Arabia": 0.50, "Israel": 0.78, "Türkiye": 0.72,
-    "Turkey": 0.72, "Azerbaijan": 0.62, "Georgia": 0.62, "Kazakhstan": 0.52,
-    "Algeria": 0.65, "Egypt": 0.75, "Tunisia": 0.60,
-    "Dominican Republic": 0.55, "Costa Rica": 0.35, "Panama": 0.50,
-    "Peru": 0.62, "Colombia": 0.72, "Jordan": 0.68, "Lebanon": 0.85,
-    # High risk
-    "Russian Federation": 0.90, "Ukraine": 0.90, "Belarus": 0.80, "Iran": 0.85,
-    "Iraq": 0.92, "Syria": 0.98, "Afghanistan": 0.98, "Yemen": 0.97,
-    "Libya": 0.95, "Nigeria": 0.85, "Pakistan": 0.88, "Venezuela": 0.90,
-    "Myanmar": 0.95, "Sudan": 0.96, "Somalia": 0.98, "Mali": 0.90,
-    "Haiti": 0.95, "North Korea": 0.95, "Dem. People's Rep. of Korea": 0.95,
-}
-
-def gov_risk_score(country):
-    """Return governance risk score (0-1, higher=riskier) for a country.
-    Uses World Bank Worldwide Governance Indicators (Political Stability).
-    Unknown countries default to 0.5 (median)."""
-    if pd.isna(country): return 0.5
-    return WGI_RISK.get(str(country).strip(), 0.5)
 
 # ?? Agri helpers ???????????????????????????????????????????????????????????????
 AGRI_CT_YEARS = sorted(agri_ct["refyear"].unique().astype(int).tolist()) if not agri_ct.empty else []
@@ -442,73 +367,15 @@ def resolve_years(val, fallback=None):
     except: return fb
 
 def compute_hhi(year):
-    """Compute TRUE supplier-concentration HHI per fuel (Fix #2-B).
-
-    Real HHI = Σ(country_share_of_imports)² across supplier countries
-    for each fuel type. Values near 0 = fragmented supply (many countries);
-    values near 1 = concentrated supply (one dominant country).
-
-    DoJ/FTC interpretation:
-        HHI < 0.15  competitive
-        0.15 - 0.25 moderately concentrated
-        > 0.25       concentrated (risk)
-        > 0.40       highly concentrated (critical)
-
-    Returns dict with:
-      'by_fuel': {fuel: hhi_value}  — per-fuel country-HHI
-      'weighted': aggregate HHI weighted by SEAI fuel-import volume
-      'shares':   {fuel: share_of_total_imports} — for context / mix charts
-      'hhi':      the weighted aggregate (for backward compatibility)
-    """
     year = int(year)
     row = S_IMP[S_IMP["year"]==year] if not S_IMP.empty else pd.DataFrame()
-    shares = {}
-    if not row.empty:
-        r = row.iloc[0]
-        total = float(r["total"]) if pd.notna(r.get("total",0)) and r.get("total",0)>0 else 1.0
-        shares = {f: safe_val(r,f)/total for f in IMP_FUELS}
-
-    # Compute true country-concentration HHI for each fuel using Comtrade
-    by_fuel = {}
-    if not comtrade.empty and CT_YEARS:
-        ct_yr = ct_nearest(year)
-        ct_imp = comtrade[(comtrade["refyear"]==ct_yr)&(comtrade["flowcode"]=="M")]
-        for fuel in IMP_FUELS:
-            fuel_rows = ct_imp[ct_imp["cmddesc"].apply(lambda v: _matches_fuel(v, fuel))]
-            if fuel_rows.empty:
-                by_fuel[fuel] = 0.0
-                continue
-            by_country = fuel_rows.groupby("partnerdesc")["primaryvalue"].sum()
-            tot = by_country.sum()
-            if tot <= 0:
-                by_fuel[fuel] = 0.0
-                continue
-            by_fuel[fuel] = round(float(((by_country / tot) ** 2).sum()), 4)
-
-    # Weight each fuel's country-HHI by its share of total energy imports,
-    # so fuels that are a tiny share of our imports don't dominate the aggregate.
-    weighted = 0.0
-    if shares and by_fuel:
-        weighted = sum(shares.get(f, 0) * by_fuel.get(f, 0) for f in IMP_FUELS)
-        weighted = round(weighted, 4)
-
-    return {
-        "hhi": weighted,
-        "by_fuel": by_fuel,
-        "shares": shares,
-        "weighted": weighted,
-    }
+    if row.empty: return {"hhi":0.0,"shares":{}}
+    r = row.iloc[0]
+    total = float(r["total"]) if pd.notna(r.get("total",0)) and r.get("total",0)>0 else 1.0
+    shares = {f: safe_val(r,f)/total for f in IMP_FUELS}
+    return {"hhi":round(sum(s**2 for s in shares.values()),4),"shares":shares}
 
 def compute_dependency(year):
-    """Country-level energy dependency score (Fix #3-B).
-
-    Weighted composite:
-       dependency = 0.4 * import_share
-                  + 0.3 * dominance (1 if >30% of imports, else 0)
-                  + 0.3 * gov_risk  (from World Bank WGI, 0-1 scale)
-
-    Higher = more concentrated + riskier country = higher dependency risk.
-    """
     if comtrade.empty or not CT_YEARS: return pd.DataFrame()
     year = int(year)
     ct_year = ct_nearest(year)
@@ -519,50 +386,72 @@ def compute_dependency(year):
     g.columns = ["country","value"]
     g["import_share"] = g["value"]/total
     g["dominance"]    = (g["import_share"]>0.30).astype(float)
-    g["gov_risk"]     = g["country"].apply(gov_risk_score)
+    g["gov_risk"]     = 0.4
     g["dependency"]   = 0.4*g["import_share"]+0.3*g["dominance"]+0.3*g["gov_risk"]
     return g.sort_values("dependency", ascending=False)
 
 def kri_for_year(year):
-    year = resolve_year(year)
-    row_imp = S_IMP[S_IMP["year"]==year] if not S_IMP.empty else pd.DataFrame()
-    row_per = S_PER[S_PER["year"]==year] if not S_PER.empty else pd.DataFrame()
-    row_ind = S_IND[S_IND["year"]==year] if not S_IND.empty else pd.DataFrame()
-    if row_imp.empty: return {}
-    r = row_imp.iloc[0]
-    total = float(r["total"]) if pd.notna(r.get("total",0)) and r.get("total",0)>0 else 1.0
-    oil_dep = round(safe_val(r,"oil")/total*100,1)
-    fossil  = safe_val(r,"oil")+safe_val(r,"natural_gas")+safe_val(r,"coal") if "coal" in r else safe_val(r,"oil")+safe_val(r,"natural_gas")
+    """Compute strategic-overview KPIs. Accepts an int year OR a list of years.
+    When multiple years: SEAI totals sum, SSR/oil_dep recomputed on summed values,
+    supplier-country count is unique across all selected years, Comtrade totals sum,
+    HHI uses the latest year's weighted HHI (HHI doesn't aggregate meaningfully)."""
+    # Normalise input to a list of years
+    if isinstance(year, (list, tuple)):
+        years_list = sorted({int(y) for y in year if y is not None})
+        if not years_list: years_list = [resolve_year(year)]
+    else:
+        years_list = [resolve_year(year)]
+    latest = max(years_list)
+    # SEAI aggregates: sum across all selected years
+    row_imp_all = S_IMP[S_IMP["year"].isin(years_list)] if not S_IMP.empty else pd.DataFrame()
+    row_per_all = S_PER[S_PER["year"].isin(years_list)] if not S_PER.empty else pd.DataFrame()
+    row_ind_all = S_IND[S_IND["year"].isin(years_list)] if not S_IND.empty else pd.DataFrame()
+    if row_imp_all.empty: return {}
+    # Sum column totals across selected years
+    total = float(row_imp_all["total"].sum()) if "total" in row_imp_all.columns else 1.0
+    if total <= 0: total = 1.0
+    oil_sum = float(row_imp_all["oil"].sum()) if "oil" in row_imp_all.columns else 0.0
+    gas_sum = float(row_imp_all["natural_gas"].sum()) if "natural_gas" in row_imp_all.columns else 0.0
+    coal_sum = float(row_imp_all["coal"].sum()) if "coal" in row_imp_all.columns else 0.0
+    oil_dep = round(oil_sum / total * 100, 1)
+    fossil  = oil_sum + gas_sum + coal_sum
     self_suff = 0.0
-    if not row_per.empty and not row_ind.empty:
-        pv = float(row_per.iloc[0].get("total",1)) if pd.notna(row_per.iloc[0].get("total",1)) else 1.0
-        iv = float(row_ind.iloc[0].get("total",0)) if pd.notna(row_ind.iloc[0].get("total",0)) else 0.0
-        self_suff = round(max(iv,0)/max(pv,1)*100,1)
-    hhi_data = compute_hhi(year)
+    if not row_per_all.empty and not row_ind_all.empty:
+        pv = float(row_per_all["total"].sum()) if "total" in row_per_all.columns else 1.0
+        iv = float(row_ind_all["total"].sum()) if "total" in row_ind_all.columns else 0.0
+        self_suff = round(max(iv, 0) / max(pv, 1) * 100, 1)
+    # HHI: use LATEST year's weighted HHI (HHI is a point-in-time concentration measure,
+    # doesn't aggregate meaningfully across years)
+    hhi_data = compute_hhi(latest)
+    # Comtrade aggregations across all selected years (nearest-mapped)
     n_sup = 0; top_sup = "N/A"; top_sh = 0.0
     ct_imp_val = 0.0; ct_exp_val = 0.0
+    ct_years_used = []
     if not comtrade.empty and CT_YEARS:
-        ct_yr = ct_nearest(year)
-        ct_y  = comtrade[comtrade["refyear"]==ct_yr]
-        ct_i  = ct_y[ct_y["flowcode"]=="M"]
-        ct_x  = ct_y[ct_y["flowcode"]=="X"]
+        ct_years_used = sorted({ct_nearest(y) for y in years_list})
+        ct_y = comtrade[comtrade["refyear"].isin(ct_years_used)]
+        ct_i = ct_y[ct_y["flowcode"]=="M"]
+        ct_x = ct_y[ct_y["flowcode"]=="X"]
         if not ct_i.empty:
             n_sup = ct_i["partnerdesc"].nunique()
-            g     = ct_i.groupby("partnerdesc")["primaryvalue"].sum()
+            g = ct_i.groupby("partnerdesc")["primaryvalue"].sum()
             top_sup = g.idxmax()
-            top_sh  = round(g.max()/g.sum()*100,1)
+            top_sh = round(g.max() / g.sum() * 100, 1)
             ct_imp_val = ct_i["primaryvalue"].sum()
         if not ct_x.empty:
             ct_exp_val = ct_x["primaryvalue"].sum()
     total_exp_ktoe = 0.0
     if not S_EXP.empty:
-        re = S_EXP[S_EXP["year"]==year]
-        if not re.empty: total_exp_ktoe = float(re.iloc[0].get("total",0))
+        re = S_EXP[S_EXP["year"].isin(years_list)]
+        if not re.empty and "total" in re.columns:
+            total_exp_ktoe = float(re["total"].sum())
+    ct_year_label = f"{min(ct_years_used)}" if len(ct_years_used)==1 else (f"{min(ct_years_used)}-{max(ct_years_used)}" if ct_years_used else str(latest))
     return {
         "oil_dep":oil_dep,"fossil_pct":round(fossil/total*100,1),"self_suff":self_suff,
         "hhi":hhi_data["hhi"],"n_suppliers":n_sup,"top_supplier":top_sup,"top_share":top_sh,
         "total_imports_ktoe":round(total,0),"total_exports_ktoe":total_exp_ktoe,
-        "ct_imp_val":ct_imp_val,"ct_exp_val":ct_exp_val,"ct_year_used":ct_nearest(year),
+        "ct_imp_val":ct_imp_val,"ct_exp_val":ct_exp_val,"ct_year_used":ct_year_label,
+        "years_used":years_list,
     }
 
 
@@ -695,52 +584,44 @@ def kri_card(title, value, unit="", colour=None, subtitle="", sector="energy"):
     ], style={"background":th["card"],"border":f"1px solid {th['border']}","borderRadius":"8px",
               "padding":"16px 18px","flex":"1","borderTop":f"2px solid {col}"})
 
-def chart_info_icon(info_id):
-    """Render a ? icon with hover tooltip if info_id matches a CHART_TOOLTIPS entry."""
-    if not info_id:
-        return None
-    t = CHART_TOOLTIPS.get(info_id)
-    if not t:
-        return None
-    # Build the tooltip content
-    parts = []
-    parts.append(html.Div(t.get("title", info_id), className="chart-tooltip-title"))
-    body = t.get("body")
-    if body:
-        parts.append(html.Div(body, className="chart-tooltip-body"))
-    legend = t.get("legend")
-    if legend:
-        legend_children = []
-        for label, colour, meaning in legend:
-            legend_children.append(html.Span(label, className="l-label"))
-            legend_children.append(html.Span(meaning, className=f"l-{colour}"))
-        parts.append(html.Div(legend_children, className="chart-tooltip-legend"))
-    source = t.get("source")
-    if source:
-        parts.append(html.Div(source, className="chart-tooltip-footer"))
-    return html.Span([
-        "?",
-        html.Span(parts, className="chart-tooltip"),
-    ], className="chart-info-icon", tabIndex=0)
-
+def chart_info_icon(graph_id, right=False):
+    """Returns an info icon with hover tooltip for the given chart ID."""
+    from chart_tooltips import TOOLTIPS
+    tt = TOOLTIPS.get(graph_id, {})
+    if not tt:
+        return html.Span()
+    cls = "chart-tooltip tt-right" if right else "chart-tooltip"
+    measures = [html.Div([
+        html.Span(lbl, className="tt-mlabel"),
+        html.Span(val, className="tt-mval"),
+    ], className="tt-metric") for lbl,val in tt.get("measures",[])]
+    tooltip = html.Div([
+        html.Div(tt.get("title",""), className="tt-head"),
+        html.Div(tt.get("desc",""), className="tt-desc"),
+        *measures,
+        html.Div(f"Source: {tt.get('source','')}", className="tt-src") if tt.get("source") else html.Span(),
+        html.Div(f"Formula: {tt.get('formula','')}", className="tt-src") if tt.get("formula") else html.Span(),
+    ], className=cls)
+    return html.Span(["?", tooltip], className="chart-info-icon")
 
 def dark_card(title, children, badge=None, flex=None, sector="energy", info_id=None):
+    # Auto-set info_id to prefixed title if not provided
+    if info_id is None:
+        info_id = f"{sector}:{title}"
+    elif ":" not in str(info_id):
+        info_id = f"{sector}:{info_id}"
     th = THEMES.get(sector, THEMES["energy"])
     style = {"background":th["card"],"border":f"1px solid {th['border']}","borderRadius":"8px","padding":"16px"}
     if flex: style["flex"] = flex
-    header_children = [
-        html.Span(title.upper(), style={"fontSize":"10px","color":th["muted"],
-            "fontWeight":"500","letterSpacing":"0.8px"}),
-    ]
-    if badge:
-        header_children.append(html.Span(badge, style={"background":BG_INPUT,
-            "border":f"1px solid {th['border']}","borderRadius":"4px",
-            "padding":"2px 8px","fontSize":"10px","color":th["muted"],"marginLeft":"8px"}))
-    icon = chart_info_icon(info_id)
-    if icon is not None:
-        header_children.append(icon)
     return html.Div([
-        html.Div(header_children, style={"marginBottom":"12px","display":"flex","alignItems":"center"}),
+        html.Div([
+            html.Span(title.upper(), style={"fontSize":"10px","color":th["muted"],
+                "fontWeight":"500","letterSpacing":"0.8px"}),
+            html.Span(badge, style={"background":BG_INPUT,"border":f"1px solid {th['border']}",
+                "borderRadius":"4px","padding":"2px 8px","fontSize":"10px","color":th["muted"],
+                "marginLeft":"8px"}) if badge else None,
+            chart_info_icon(info_id) if info_id else None,
+        ], style={"marginBottom":"12px","display":"flex","alignItems":"center","gap":"4px"}),
         *children,
     ], style=style)
 
@@ -898,6 +779,28 @@ app.index_string = '''<!DOCTYPE html>
     100%{transform:translateX(105%)}
   }
 
+  /* Chart tooltip styles */
+  .chart-info-icon{display:inline-flex;align-items:center;justify-content:center;
+    width:14px;height:14px;border-radius:50%;border:1px solid;
+    font-size:9px;font-weight:700;cursor:pointer;margin-left:6px;
+    vertical-align:middle;position:relative;flex-shrink:0;
+    background:rgba(255,255,255,0.07);border-color:rgba(255,255,255,0.2);
+    color:rgba(255,255,255,0.5);user-select:none;line-height:1;}
+  .chart-info-icon:hover{background:rgba(255,255,255,0.15);
+    border-color:rgba(255,255,255,0.4);color:#fff;}
+  .chart-tooltip{display:none;position:absolute;top:22px;left:0;z-index:9999;
+    width:300px;background:#111820;border:1px solid #2e4a6a;
+    border-radius:8px;padding:12px 14px;pointer-events:none;
+    box-shadow:0 4px 24px rgba(0,0,0,0.5);}
+  .chart-tooltip.tt-right{left:auto;right:0;}
+  .chart-info-icon:hover .chart-tooltip{display:block;}
+  .tt-head{font-size:11px;font-weight:600;color:#e8eef5;margin-bottom:6px;
+    border-bottom:1px solid #1e3048;padding-bottom:6px;}
+  .tt-desc{font-size:11px;color:#7a9ab8;line-height:1.55;margin-bottom:8px;}
+  .tt-metric{display:flex;justify-content:space-between;margin-bottom:3px;font-size:10px;}
+  .tt-mlabel{color:#4a6a88;} .tt-mval{color:#f5a623;font-weight:500;}
+  .tt-src{font-size:9px;color:#3a5a78;margin-top:6px;padding-top:6px;
+    border-top:1px solid #1e3048;}
   /* Dashboard tab transitions -- veil wipe */
   #page-veil{
     position:fixed;top:0;left:0;width:100vw;height:100vh;
@@ -937,58 +840,6 @@ app.index_string = '''<!DOCTYPE html>
   .sector-btn-energy.active{background:#f5a623!important;color:#0a0e14!important}
   .sector-btn-agri.active{background:#4caf50!important;color:#071a0a!important}
   .sector-btn-medtech.active{background:#b39ddb!important;color:#140d20!important}
-
-  /* ===== Chart info icon (?) + hover tooltip ===== */
-  .chart-info-icon{
-    display:inline-flex;align-items:center;justify-content:center;
-    width:18px;height:18px;border-radius:50%;
-    background:rgba(139,148,158,0.12);border:1px solid #3a4452;
-    color:#8b949e;font-size:11px;font-weight:600;
-    font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;
-    cursor:help;transition:all 0.18s;position:relative;user-select:none;
-    margin-left:4px;
-  }
-  .chart-info-icon:hover{
-    background:rgba(245,166,35,0.18);border-color:#f5a623;color:#f5a623;
-  }
-  .chart-tooltip{
-    position:absolute;top:calc(100% + 10px);left:-12px;
-    background:#0d1420;border:1px solid #2d3748;border-radius:8px;
-    padding:14px 16px;width:340px;
-    font-size:12.5px;font-weight:400;line-height:1.5;
-    color:#d1d5db;letter-spacing:0.1px;text-transform:none;
-    font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;
-    box-shadow:0 10px 30px rgba(0,0,0,0.7);
-    opacity:0;visibility:hidden;transition:opacity 0.18s,visibility 0.18s;
-    z-index:1000;pointer-events:none;text-align:left;
-  }
-  .chart-info-icon:hover .chart-tooltip,
-  .chart-info-icon:focus .chart-tooltip{opacity:1;visibility:visible}
-  .chart-tooltip-title{
-    font-size:14px;font-weight:600;color:#ffffff;
-    margin:0 0 10px 0;padding-bottom:10px;
-    border-bottom:1px solid #2d3748;
-  }
-  .chart-tooltip-body{
-    font-size:12.5px;color:#c9d1d9;margin:0 0 8px 0;line-height:1.55;
-  }
-  .chart-tooltip-legend{
-    font-size:11.5px;color:#8b949e;line-height:1.7;
-    margin:10px 0 0 0;display:grid;grid-template-columns:1fr auto;gap:2px 16px;
-  }
-  .chart-tooltip-legend .l-label{
-    color:#8b949e;font-family:"SF Mono",Menlo,Consolas,monospace;font-size:11px;
-  }
-  .chart-tooltip-legend .l-green { color:#4caf50;font-weight:600 }
-  .chart-tooltip-legend .l-amber { color:#f5a623;font-weight:600 }
-  .chart-tooltip-legend .l-orange{ color:#ff7043;font-weight:600 }
-  .chart-tooltip-legend .l-red   { color:#e53935;font-weight:600 }
-  .chart-tooltip-legend .l-blue  { color:#4fc3f7;font-weight:600 }
-  .chart-tooltip-legend .l-grey  { color:#8b949e;font-weight:400 }
-  .chart-tooltip-footer{
-    font-size:10.5px;color:#6b7380;margin-top:12px;padding-top:10px;
-    border-top:1px solid #2d3748;font-style:italic;
-  }
 </style>
 </head>
 <body>
@@ -1153,6 +1004,8 @@ def topbar(current_sector, current_slug):
         html.Div([
             html.Span(sources[current_sector],
                       style={"fontSize":"11px","color":th["muted"]}),
+            html.Span(" . (c) 2026 3S Group, Maynooth University",
+                      style={"fontSize":"11px","color":th["muted"]}),
         ], style={"display":"flex","alignItems":"center","gap":"4px","flex":"1","justifyContent":"center"}),
         sector_pill(current_sector),
     ], style={"background":th["surface"],"borderBottom":f"1px solid {th['border']}",
@@ -1298,11 +1151,11 @@ def e_d1_layout():
                  [yr_dropdown("e-d1-year",year_list=SEAI_DROPDOWN_YEARS,multi=True),
                   html.Div(yr_range_slider("e-d1-range"),style={"minWidth":"320px","flex":"1"})]),
         html.Div(id="e-d1-kri", style={"display":"flex","gap":"12px","marginBottom":"16px","flexWrap":"wrap"}),
-        row(dark_card("HHI by fuel type",[dark_graph("e-d1-hhi-bar",260)],flex="2",sector=SEC, info_id="HHI by fuel type"),
-            dark_card("Risk signal feed",[html.Div(id="e-d1-insights",style={"overflowY":"auto","maxHeight":"280px"})],flex="1",sector=SEC, info_id="Risk signal feed")),
-        row(dark_card("Oil import dependency trend (%)",[dark_graph("e-d1-oil-trend",200)],flex="1",sector=SEC, info_id="Oil import dependency trend (%)"),
-            dark_card("Self-sufficiency trend (%)",[dark_graph("e-d1-ss-trend",200)],flex="1",sector=SEC, info_id="Self-sufficiency trend (%)")),
-        dark_card("Critical fuel summary",[html.Div(id="e-d1-table")],sector=SEC, info_id="Critical fuel summary"),
+        row(dark_card("HHI by fuel type",[dark_graph("e-d1-hhi-bar",260)],flex="2",sector=SEC,info_id="e-d1-hhi-bar"),
+            dark_card("Risk signal feed",[html.Div(id="e-d1-insights",style={"overflowY":"auto","maxHeight":"280px"})],flex="1",sector=SEC)),
+        row(dark_card("Oil import dependency trend (%)",[dark_graph("e-d1-oil-trend",200)],flex="1",sector=SEC,info_id="e-d1-oil-trend"),
+            dark_card("Self-sufficiency trend (%)",[dark_graph("e-d1-ss-trend",200)],flex="1",sector=SEC,info_id="e-d1-ss-trend")),
+        dark_card("Critical fuel summary",[html.Div(id="e-d1-table")],sector=SEC),
         raw_data_section("e-d1",[
             ("SEAI Energy Balance", seai.head(500) if not seai.empty else None,
              ["year","flow","oil","natural_gas","electricity","total"]),
@@ -1318,25 +1171,29 @@ def e_d1_layout():
     Input("url","pathname"),Input("e-d1-year","value"),Input("e-d1-range","value"))
 def cb_e_d1(pathname, years, yr_range):
     sel = resolve_years(years); year = max(sel) if sel else DEFAULT_YEAR
-    k = kri_for_year(year)
+    yr_label = f"{min(sel)}" if len(sel)<=1 else f"{min(sel)}-{max(sel)}"
+    # Pass full list to aggregate across all selected years
+    k = kri_for_year(sel if sel else year)
     def col_oil(v): return C_RED if v>70 else C_ORANGE if v>55 else C_AMBER if v>40 else C_GREEN
-    row_c = S_IMP[S_IMP["year"]==year] if not S_IMP.empty else pd.DataFrame(); crit=0
-    if not row_c.empty:
-        r=row_c.iloc[0]; tot=float(r.get("total",1)) if pd.notna(r.get("total",1)) and r.get("total",1)>0 else 1.0
-        crit = sum(1 for f in IMP_FUELS if (safe_val(r,f)/tot)**2 > 0.40)
+    row_c_multi = S_IMP[S_IMP["year"].isin(sel)] if not S_IMP.empty and sel else pd.DataFrame()
+    crit=0
+    if not row_c_multi.empty:
+        tot=float(row_c_multi["total"].sum()) if "total" in row_c_multi.columns else 1.0
+        if tot<=0: tot=1.0
+        crit = sum(1 for f in IMP_FUELS if (row_c_multi[f].sum()/tot)**2 > 0.40) if all(f in row_c_multi.columns for f in IMP_FUELS) else 0
     ct_imp=k.get("ct_imp_val",0); ct_exp=k.get("ct_exp_val",0); ct_yr_used=k.get("ct_year_used",year)
     cards = html.Div([
         kri_card("Average HHI",f"{k.get('hhi',0):.3f}","",hhi_colour(k.get("hhi",0)),hhi_label(k.get("hhi",0)),SEC),
-        kri_card("Oil Import Dependency",f"{k.get('oil_dep',0)}","%",col_oil(k.get("oil_dep",0)),f"SEAI {year}",SEC),
+        kri_card("Oil Import Dependency",f"{k.get('oil_dep',0)}","%",col_oil(k.get("oil_dep",0)),f"SEAI {yr_label}",SEC),
         kri_card("Self-Sufficiency",f"{k.get('self_suff',0)}","%",
                  C_GREEN if k.get("self_suff",0)>30 else C_AMBER if k.get("self_suff",0)>15 else C_RED,
                  "Indigenous / Primary Energy Req",SEC),
         kri_card("Supplier Countries",str(k.get("n_suppliers","N/A")),"",ACCENT2,f"Import partners {ct_yr_used}",SEC),
         kri_card("Critical Fuels (HHI>0.40)",str(crit),"fuels",C_RED if crit>0 else C_GREEN,"Fuels above critical threshold",SEC),
         kri_card("Total Energy Imports",f"{k.get('total_imports_ktoe',0):,.0f}","ktoe",C_RED,
-                 f"{fmt_val(ct_imp)} . Comtrade {ct_yr_used}" if ct_imp>0 else f"SEAI {year}",SEC),
+                 f"{fmt_val(ct_imp)} . Comtrade {ct_yr_used}" if ct_imp>0 else f"SEAI {yr_label}",SEC),
         kri_card("Total Energy Exports",f"{k.get('total_exports_ktoe',0):,.0f}","ktoe",C_GREEN,
-                 f"{fmt_val(ct_exp)} . Comtrade {ct_yr_used}" if ct_exp>0 else f"SEAI {year}",SEC),
+                 f"{fmt_val(ct_exp)} . Comtrade {ct_yr_used}" if ct_exp>0 else f"SEAI {yr_label}",SEC),
     ], style={"display":"flex","gap":"12px","flexWrap":"wrap"})
     fig = go.Figure()
     for yr in sel:
@@ -1367,10 +1224,13 @@ def cb_e_d1(pathname, years, yr_range):
     if not insights:  insights.append(("LOW",C_GREEN,"No Alerts","All indicators within acceptable ranges"))
     ins_els = [insight_item(s,c,t,m) for s,c,t,m in insights]
     tbl_data=[]
-    if not row_c.empty:
-        r=row_c.iloc[0]; tot=float(r.get("total",1)) if pd.notna(r.get("total",1)) and r.get("total",1)>0 else 1.0
+    # Use the same multi-year aggregated data as the KPI cards for consistency
+    if not row_c_multi.empty:
+        tot=float(row_c_multi["total"].sum()) if "total" in row_c_multi.columns else 1.0
+        if tot<=0: tot=1.0
         for f in IMP_FUELS:
-            v=safe_val(r,f); sh=v/tot*100; hf=(v/tot)**2
+            v=float(row_c_multi[f].sum()) if f in row_c_multi.columns else 0.0
+            sh=v/tot*100; hf=(v/tot)**2
             tbl_data.append({"Fuel":f.replace("_"," ").title(),"Import (ktoe)":f"{v:,.0f}",
                               "Share (%)":f"{sh:.1f}%","HHI":f"{hf:.4f}","Risk":hhi_label(hf)})
     tbl = dash_table.DataTable(data=tbl_data,
@@ -1427,36 +1287,72 @@ def e_d2_layout():
                  "HHI concentration, country dependency scores, continental breakdown, historical trend",
                  [yr_dropdown("e-d2-year",year_list=SEAI_DROPDOWN_YEARS,multi=True),
                   html.Div(yr_range_slider("e-d2-range"),style={"minWidth":"320px","flex":"1"})]),
-        row(dark_card("HHI by Fuel Type",[dark_graph("e-d2-hhi",260)],flex="1",badge="Higher = more concentrated = higher risk",sector=SEC, info_id="HHI by Fuel Type"),
-            dark_card("Country Dependency Score",[dark_graph("e-d2-dep",260)],flex="1",badge="0.4 x share + 0.3 x dominance + 0.3 x gov risk",sector=SEC, info_id="Country Dependency Score")),
-        row(dark_card("Continental Breakdown -- Import vs Export",[dark_graph("e-d2-cont",240)],flex="1",sector=SEC, info_id="Continental Breakdown -- Import vs Export"),
-            dark_card("HHI Trend Over Time",[dark_graph("e-d2-ht",240)],flex="1",badge="Year range slider above",sector=SEC, info_id="HHI Trend Over Time")),
+        html.Div(id="e-d2-kri",style={"display":"flex","gap":"12px","marginBottom":"16px","flexWrap":"wrap"}),
+        row(dark_card("HHI by Fuel Type",[dark_graph("e-d2-hhi",260)],flex="1",badge="Higher = more concentrated = higher risk",sector=SEC,info_id="e-d2-hhi"),
+            dark_card("Country Dependency Score",[dark_graph("e-d2-dep",260)],flex="1",badge="0.4 x share + 0.3 x dominance + 0.3 x gov risk",sector=SEC,info_id="e-d2-dep")),
+        row(dark_card("Continental Breakdown -- Import vs Export",[dark_graph("e-d2-cont",240)],flex="1",sector=SEC,info_id="e-d2-cont"),
+            dark_card("HHI Trend Over Time",[dark_graph("e-d2-ht",240)],flex="1",badge="Year range slider above",sector=SEC,info_id="e-d2-ht")),
         raw_data_section("e-d2",[
+            ("SEAI Energy Balance",seai.head(500) if not seai.empty else None,
+             ["year","flow","oil","natural_gas","electricity","total"]),
             ("Comtrade Imports",comtrade[comtrade["flowcode"]=="M"].head(500) if not comtrade.empty else None,
              ["refyear","partnerdesc","cmddesc","primaryvalue","continent"]),
         ]),
     ])
 
 @app.callback(
+    Output("e-d2-kri","children"),
     Output("e-d2-hhi","figure"),Output("e-d2-dep","figure"),
     Output("e-d2-cont","figure"),Output("e-d2-ht","figure"),
     Input("url","pathname"),Input("e-d2-year","value"),Input("e-d2-range","value"))
 def cb_e_d2(pathname,years,yr_range):
-    year=resolve_year(years); yr_range=yr_range or [2010,YEAR_MAX]
-    # Fix #2-B: use TRUE country-concentration HHI per fuel (Σ country_share²
-    # across supplier countries for each fuel), not fuel-mix concentration.
-    hhi_data = compute_hhi(year)
-    by_fuel = hhi_data.get("by_fuel", {})
+    years_list = resolve_years(years) if 'resolve_years' in globals() else ([resolve_year(years)])
+    year=max(years_list); yr_range=yr_range or [2010,YEAR_MAX]
+    # KPI cards — all values dynamic from Comtrade for the selected year(s).
+    # When multiple years are selected, values aggregate across ALL selected years.
+    # IMPORT HHI uses supplier-country concentration (not product-mix) so it
+    # matches the "supplier risk" theme of this page. Lower numbers are better:
+    # <0.15 competitive, 0.15-0.25 moderate, 0.25-0.40 high, >0.40 critical.
+    th_kri = THEMES[SEC]
+    # Map selected years to nearest available Comtrade years
+    ct_years_kri = sorted(set(ct_nearest(y) for y in years_list))
+    yr_label_kri = f"{min(ct_years_kri)}" if len(ct_years_kri)==1 else f"{min(ct_years_kri)}-{max(ct_years_kri)}"
+    imp_kri = comtrade[(comtrade["refyear"].isin(ct_years_kri))&(comtrade["flowcode"]=="M")] if not comtrade.empty else pd.DataFrame()
+    imp_total_kri = imp_kri["primaryvalue"].sum() if not imp_kri.empty else 0
+    # Filter junk partners (world/totals/unspecified)
+    JUNK_KRI = {"world","areas, nes","other","unspecified","not specified","total"}
+    imp_clean_kri = imp_kri[~imp_kri["partnerdesc"].astype(str).str.strip().str.lower().isin(JUNK_KRI)] if not imp_kri.empty else pd.DataFrame()
+    top_src_kri = "N/A"; top_src_sh_kri = 0.0
+    hhi_kri = 0.0
+    if not imp_clean_kri.empty:
+        gs_kri = imp_clean_kri.groupby("partnerdesc")["primaryvalue"].sum().sort_values(ascending=False)
+        clean_total_kri = gs_kri.sum()
+        if clean_total_kri > 0:
+            top_src_kri = gs_kri.index[0]
+            top_src_sh_kri = round(gs_kri.iloc[0]/clean_total_kri*100, 1)
+            # Supplier-country HHI: Σ (country_share)²
+            hhi_kri = round(sum((v/clean_total_kri)**2 for v in gs_kri.values), 4)
+    n_partners_kri = imp_kri["partnerdesc"].nunique() if not imp_kri.empty else 0
+    kri_cards = html.Div([
+        kri_card("Total energy imports", fmt_val(imp_total_kri), "", th_kri["c3"], f"Comtrade {yr_label_kri}", SEC),
+        kri_card("Top import source", top_src_kri, "", th_kri["accent"], f"{top_src_sh_kri:.1f}% share", SEC),
+        kri_card("Import HHI", f"{hhi_kri:.3f}", "", hhi_colour(hhi_kri), hhi_label(hhi_kri), SEC),
+        kri_card("Import partners", str(n_partners_kri), "", th_kri["accent2"], "Unique countries", SEC),
+    ], style={"display":"flex","gap":"12px","flexWrap":"wrap"})
+    row_s=S_IMP[S_IMP["year"]==year] if not S_IMP.empty else pd.DataFrame()
+    if not row_s.empty:
+        r=row_s.iloc[0]; tot=float(r.get("total",1)) if pd.notna(r.get("total",1)) and r.get("total",1)>0 else 1.0
+        hhis=[round((safe_val(r,f)/tot)**2,4) for f in IMP_FUELS]
+    else: hhis=[0]*3; tot=1.0
     labels=[f.replace("_"," ").title() for f in IMP_FUELS]
-    hhis  =[by_fuel.get(f, 0.0) for f in IMP_FUELS]
     pairs=sorted(zip(hhis,labels),reverse=True); hs,ls=zip(*pairs) if pairs else ([],[])
     fig_hhi=go.Figure(go.Bar(y=list(ls),x=list(hs),orientation="h",
         marker_color=[hhi_colour(h) for h in hs],
         text=[f"{h:.4f}  {hhi_label(h)}" for h in hs],textposition="outside",
-        textfont=dict(color=TEXT_PRI,size=11),name="Country-HHI"))
+        textfont=dict(color=TEXT_PRI,size=11),name="HHI Score"))
     fig_hhi.add_vline(x=0.40,line_dash="dash",line_color=C_RED,opacity=0.8,annotation_text="Critical 0.40",annotation_font=dict(color=C_RED,size=10))
     fig_hhi.add_vline(x=0.25,line_dash="dot",line_color=C_AMBER,opacity=0.7,annotation_text="High 0.25",annotation_font=dict(color=C_AMBER,size=10))
-    themed_layout(fig_hhi,SEC,False); fig_hhi.update_xaxes(title=dict(text="Country-HHI (supplier concentration)",font=dict(color=TEXT_SEC,size=11),standoff=12),range=[0,1.05])
+    themed_layout(fig_hhi,SEC,False); fig_hhi.update_xaxes(title=dict(text="HHI Score",font=dict(color=TEXT_SEC,size=11),standoff=12),range=[0,0.55])
     fig_hhi.update_yaxes(title=dict(text="Fuel Type",font=dict(color=TEXT_SEC,size=11),standoff=12)); fig_hhi
     dep=compute_dependency(year); JUNK={"world","other","areas, nes","total","unspecified","not specified"}
     if not dep.empty:
@@ -1488,11 +1384,10 @@ def cb_e_d2(pathname,years,yr_range):
         fig_cont=go.Figure(); themed_layout(fig_cont,SEC,False)
     hhi_t=[]
     for y in range(int(yr_range[0]),int(yr_range[1])+1):
-        # Fix #2-B: use weighted country-HHI aggregate (from compute_hhi),
-        # which is supplier-concentration per fuel × fuel-share weights.
-        hhi_y = compute_hhi(y).get("weighted", 0.0)
-        if hhi_y > 0:
-            hhi_t.append({"year": y, "hhi": hhi_y})
+        ry=S_IMP[S_IMP["year"]==y] if not S_IMP.empty else pd.DataFrame()
+        if ry.empty: continue
+        r=ry.iloc[0]; tot=float(r.get("total",1)) if pd.notna(r.get("total",1)) and r.get("total",1)>0 else 1.0
+        hhi_t.append({"year":y,"hhi":round(sum((safe_val(r,f)/tot)**2 for f in IMP_FUELS),4)})
     df_ht=pd.DataFrame(hhi_t); fig_ht=go.Figure()
     if not df_ht.empty:
         fig_ht.add_trace(go.Scatter(x=df_ht["year"],y=df_ht["hhi"],mode="lines+markers",
@@ -1504,13 +1399,13 @@ def cb_e_d2(pathname,years,yr_range):
     fig_ht.update_xaxes(title=dict(text="Year",font=dict(color=TEXT_SEC,size=11),standoff=12))
     fig_ht.update_yaxes(title=dict(text="HHI Score",font=dict(color=TEXT_SEC,size=11),standoff=12))
     fig_ht.update_layout(legend=dict(orientation="h",y=-0.25,x=0,font=dict(size=11),bgcolor="rgba(0,0,0,0)"))
-    return fig_hhi,fig_dep,fig_cont,fig_ht
+    return kri_cards, fig_hhi, fig_dep, fig_cont, fig_ht
 
 make_raw_toggle("e-d2-raw-toggle-btn","e-d2-raw-panel","e-d2-raw-content","e-d2-raw-source-tabs",[
+    ("SEAI Energy Balance",seai.head(500) if not seai.empty else None,
+     ["year","flow","oil","natural_gas","electricity","total"]),
     ("Comtrade Imports",comtrade[comtrade["flowcode"]=="M"].head(500) if not comtrade.empty else None,
      ["refyear","partnerdesc","cmddesc","primaryvalue","continent"]),
-    ("SEAI Imports",seai[seai["flow"]=="Imports"].head(200) if not seai.empty else None,
-     ["year","flow","oil","natural_gas","electricity","total"]),
 ])
 
 
@@ -1519,8 +1414,8 @@ def e_d3_layout():
     return html.Div([
         e_header("Energy -- Supply Flow Sankey",
                  "Directional energy flows -- import origins >> Ireland >> export destinations",
-                 [yr_dropdown("e-d3-year")]),
-        dark_card("Supply Flow Sankey Diagram",[dark_graph("e-d3-sankey",420)],sector=SEC, info_id="Supply Flow Sankey Diagram"),
+                 [yr_dropdown("e-d3-year",multi=False)]),
+        dark_card("Supply Flow Sankey Diagram",[dark_graph("e-d3-sankey",420)],sector=SEC,info_id="e-d3-sankey"),
         html.Div([html.Div(id="e-d3-import-table"),html.Div(id="e-d3-export-table"),html.Div(id="e-d3-flow-summary")],
                  style={"display":"flex","gap":"12px","marginTop":"12px"}),
         raw_data_section("e-d3",[
@@ -1564,15 +1459,15 @@ def cb_e_d3(pathname,years):
     sankey_layout(fig,SEC)
     def make_table(df_g,title):
         if df_g is None or df_g.empty:
-            return dark_card(title,[html.P("No data",style={"color":TEXT_MUTED,"fontSize":"12px"})],flex="1",sector=SEC, info_id=title)
+            return dark_card(title,[html.P("No data",style={"color":TEXT_MUTED,"fontSize":"12px"})],flex="1",sector=SEC)
         g=df_g.groupby("partnerdesc")["primaryvalue"].sum().sort_values(ascending=False).head(8)
         rows=[html.Div([html.Span(f"{p}",style={"fontSize":"12px","color":TEXT_SEC,"flex":"1"}),
                         html.Span(fmt_val(v),style={"fontSize":"12px","color":TEXT_PRI,"fontWeight":"600"})],
                        style={"display":"flex","justifyContent":"space-between","padding":"6px 0",
                               "borderBottom":f"1px solid {BORDER}"}) for p,v in g.items()]
-        return dark_card(title,rows,flex="1",sector=SEC, info_id=title)
+        return dark_card(title,rows,flex="1",sector=SEC)
     imp_tbl=make_table(imp,"Top Import Sources")
-    exp_tbl=make_table(exp,"Top Export Markets") if not exp.empty else dark_card("Top Export Markets",[html.P("No data",style={"color":TEXT_MUTED})],flex="1",sector=SEC, info_id="Top Export Markets")
+    exp_tbl=make_table(exp,"Top Export Markets") if not exp.empty else dark_card("Top Export Markets",[html.P("No data",style={"color":TEXT_MUTED})],flex="1",sector=SEC)
     summary=dark_card("Flow Summary",[
         html.Div([html.Span("Total Imports",style={"color":TEXT_MUTED,"fontSize":"11px"}),
                   html.Span(fmt_val(imp["primaryvalue"].sum()),style={"color":C_RED,"fontWeight":"700","fontSize":"16px"})],style={"marginBottom":"8px"}),
@@ -1580,7 +1475,7 @@ def cb_e_d3(pathname,years):
                   html.Span(fmt_val(exp["primaryvalue"].sum()) if not exp.empty else "N/A",style={"color":C_GREEN,"fontWeight":"700","fontSize":"16px"})],style={"marginBottom":"8px"}),
         html.Div([html.Span("Import Partners",style={"color":TEXT_MUTED,"fontSize":"11px"}),
                   html.Span(str(imp["partnerdesc"].nunique()),style={"color":ACCENT2,"fontWeight":"700","fontSize":"16px"})]),
-    ],flex="1",sector=SEC, info_id="Flow Summary")
+    ],flex="1",sector=SEC)
     return fig,imp_tbl,exp_tbl,summary
 
 make_raw_toggle("e-d3-raw-toggle-btn","e-d3-raw-panel","e-d3-raw-content","e-d3-raw-source-tabs",[
@@ -1600,7 +1495,7 @@ def e_d4_layout():
                                    value="Both",clearable=False,style={"fontSize":"13px","width":"160px","backgroundColor":"#ffffff","color":"#111111","border":f"1px solid {BORDER}"}),
                   ])]),
         html.Div([
-            html.Div([dark_card("Bilateral Energy Trade Map",[dark_graph("e-d4-map",460)],sector=SEC, info_id="Bilateral Energy Trade Map")],style={"flex":"1","minWidth":"0"}),
+            html.Div([dark_card("Bilateral Energy Trade Map",[dark_graph("e-d4-map",460)],sector=SEC,info_id="e-d4-map")],style={"flex":"1","minWidth":"0"}),
             html.Div(id="e-d4-country-panel",style={"width":"240px","flexShrink":"0","background":BG_CARD,"border":f"1px solid {BORDER}","borderRadius":"8px","padding":"14px","overflowY":"auto","maxHeight":"500px"}),
         ],style={"display":"flex","gap":"14px","marginBottom":"14px"}),
         html.Div(id="e-d4-kpi",style={"display":"flex","gap":"12px"}),
@@ -1696,7 +1591,7 @@ def e_d6_layout():
     return html.Div([
         e_header("Energy -- Stress Testing",
                  "Supplier removal impact -- supply lost by product, alternative sourcing options",
-                 [yr_dropdown("e-d6-year",multi=True,default=2023),
+                 [yr_dropdown("e-d6-year",multi=False,default=2023),
                   html.Div([
                       html.Label("Remove Country",style={"fontSize":"11px","color":TEXT_MUTED,"display":"block","marginBottom":"4px"}),
                       dcc.Dropdown(id="e-d6-country",options=[{"label":p,"value":p} for p in CT_PARTNERS if p!="World"],
@@ -1704,9 +1599,9 @@ def e_d6_layout():
                                    style={"fontSize":"13px","width":"220px","backgroundColor":"#ffffff","color":"#111111","border":f"1px solid {BORDER}"}),
                   ])]),
         html.Div(id="e-d6-cards",style={"display":"flex","gap":"12px","marginBottom":"16px"}),
-        row(dark_card("Supply Lost by Product (%)",[dark_graph("e-d6-bar",280)],flex="2",sector=SEC, info_id="Supply Lost by Product (%)"),
-            dark_card("Top Alternative Suppliers",[html.Div(id="e-d6-alts")],flex="1",sector=SEC, info_id="Top Alternative Suppliers")),
-        dark_card("Detailed Impact Table",[html.Div(id="e-d6-table")],sector=SEC, info_id="Detailed Impact Table"),
+        row(dark_card("Supply Lost by Product (%)",[dark_graph("e-d6-bar",280)],flex="2",sector=SEC,info_id="e-d6-bar"),
+            dark_card("Top Alternative Suppliers",[html.Div(id="e-d6-alts")],flex="1",sector=SEC)),
+        dark_card("Detailed Impact Table",[html.Div(id="e-d6-table")],sector=SEC),
         raw_data_section("e-d6",[
             ("Comtrade Imports",comtrade[comtrade["flowcode"]=="M"].head(500) if not comtrade.empty else None,
              ["refyear","partnerdesc","cmddesc","primaryvalue"]),
@@ -1738,7 +1633,7 @@ def cb_e_d6(pathname,years,country):
         kri_card("Products Affected",str(sum(1 for r in results if r.get("lost_share",0)>0)),"",C_GREEN if sum(1 for r in results if r.get("lost_share",0)>0)==0 else ACCENT2,"Products with >0% supply from this country",SEC),
         kri_card("Critical Impact",str(crit),"",C_RED,">70% supply lost",SEC),
         kri_card("Severe Impact",str(sev),"",C_ORANGE,"40-70% supply lost",SEC),
-        kri_card("Max Potential Loss",fmt_val(var),"",C_RED,f"From {country} (assumes no substitution)",SEC),
+        kri_card("Total Value at Risk",fmt_val(var),"",C_RED,f"From {country}",SEC),
     ],style={"display":"flex","gap":"12px"})
     fig=go.Figure(go.Bar(y=[r["product"][:35] for r in results],x=[r["lost_share"] for r in results],
         orientation="h",marker_color=[r["colour"] for r in results],
@@ -1801,23 +1696,13 @@ def e_d7_layout():
                     slider_row("Disruption Severity (%)","e-d7-sev",0,100,1,80,"%"),
                     slider_row("Demand Surge Factor","e-d7-dem",1.0,3.0,0.1,1.5,"?"),
                     slider_row("Monte Carlo Iterations","e-d7-iters",100,2000,100,1000,""),
-                ],sector=SEC, info_id="Scenario Parameters"),
+                ],sector=SEC),
                 html.Div(id="e-d7-kpi",style={"display":"flex","gap":"12px","marginTop":"12px"}),
             ],style={"flex":"1"}),
-            dark_card("Potential Loss Distribution",[dark_graph("e-d7-hist",300)],flex="2",sector=SEC, info_id="VaR Distribution")),
-        row(dark_card("12-Month Impact Timeline",[dark_graph("e-d7-tl",220)],flex="1",sector=SEC, info_id="12-Month Impact Timeline"),
-            dark_card("Impact by Product",[dark_graph("e-d7-prod",220)],flex="1",sector=SEC, info_id="Impact by Product")),
-        dark_card("Percentile Summary Table",[html.Div(id="e-d7-ptbl")],sector=SEC, info_id="Percentile Summary Table"),
-        html.Div("Scenario assumes no short-term substitution from alternative suppliers. Real-world impact is typically lower as reshoring and rerouting mitigate some losses over 3–12 months.",
-                 style={"fontSize":"11px","color":TEXT_MUTED,"marginTop":"12px","fontStyle":"italic","textAlign":"center"}),
-        raw_data_section("e-d7",[
-            ("Comtrade Imports (base for Monte Carlo)",
-             comtrade[(comtrade["refyear"]==CT_YEAR_MAX)&(comtrade["flowcode"]=="M")].head(500) if not comtrade.empty else None,
-             ["refyear","partnerdesc","cmddesc","primaryvalue"]),
-            ("SEAI Imports",
-             seai[seai["flow"]=="Imports"].head(200) if not seai.empty else None,
-             ["year","flow","oil","natural_gas","electricity","total"]),
-        ]),
+            dark_card("VaR Distribution",[dark_graph("e-d7-hist",300)],flex="2",sector=SEC,info_id="e-d7-hist")),
+        row(dark_card("12-Month Impact Timeline",[dark_graph("e-d7-tl",220)],flex="1",sector=SEC,info_id="e-d7-tl"),
+            dark_card("Impact by Product",[dark_graph("e-d7-prod",220)],flex="1",sector=SEC,info_id="e-d7-prod")),
+        dark_card("Percentile Summary Table",[html.Div(id="e-d7-ptbl")],sector=SEC),
     ])
 
 @app.callback(Output("e-d7-sev-out","children"),Input("e-d7-sev","value"))
@@ -1832,21 +1717,13 @@ def upd_e_iters(v): return f"{v or 1000:,}"
               Input("e-d7-sev","value"),Input("e-d7-dem","value"),Input("e-d7-iters","value"))
 def cb_e_d7(severity,demand,iters):
     sev=(severity or 80)/100; dem=demand or 1.5; n=iters or 1000
-    np.random.seed(42)
-    # Fix #6: derive base from live data, not hardcoded 9.5e9.
-    # Mirrors the pattern the MedTech War Room already uses.
-    if not comtrade.empty and CT_YEARS:
-        base = comtrade[(comtrade["refyear"]==CT_YEAR_MAX)&(comtrade["flowcode"]=="M")]["primaryvalue"].sum()
-    else:
-        base = 9.5e9  # fallback when no data
-    base = base if base > 0 else 9.5e9
+    np.random.seed(42); base=9.5e9
     samples=[base*sev*np.random.uniform(0.7,1.3)+base*(dem-1)*np.random.uniform(0.8,1.2) for _ in range(n)]
     arr=np.array(samples)/1e9
     p5,p25,p50,p75,p95=np.percentile(arr,[5,25,50,75,95])
     imp_pct=round(p50/(base/1e9)*100,1)
     kpis=html.Div([
-        # Fix #13: rename "Value at Risk" to "Median Potential Loss" (more accurate)
-        kri_card("Median Potential Loss",f"EUR {p50:.2f}","bn",C_RED if p50>5 else C_ORANGE,"P50 most likely outcome",SEC),
+        kri_card("Median VaR",f"EUR {p50:.2f}","bn",C_RED if p50>5 else C_ORANGE,"P50 most likely outcome",SEC),
         kri_card("Import Impact",f"{imp_pct}","%",C_RED if imp_pct>50 else C_ORANGE,"% of annual imports",SEC),
         kri_card("P95 Worst Case",f"EUR {p95:.2f}","bn",C_RED,"Only 5% worse than this",SEC),
         kri_card("P5 Best Case",f"EUR {p5:.2f}","bn",C_GREEN,"Only 5% better than this",SEC),
@@ -1855,7 +1732,7 @@ def cb_e_d7(severity,demand,iters):
     for val,lbl,col in [(p5,"P5",C_GREEN),(p50,"P50",C_AMBER),(p95,"P95",C_RED)]:
         fig_h.add_vline(x=val,line_dash="dash",line_color=col,annotation_text=f"{lbl}: EUR {val:.2f}bn",annotation_position="top",annotation_font=dict(color=col,size=11))
     themed_layout(fig_h,SEC,True)
-    fig_h.update_xaxes(title=dict(text=f"Potential Loss (EUR Billion) | n={n:,} iterations",font=dict(color=TEXT_SEC,size=11)))
+    fig_h.update_xaxes(title=dict(text=f"Value at Risk (EUR Billion) | n={n:,} iterations",font=dict(color=TEXT_SEC,size=11)))
     fig_h.update_yaxes(title=dict(text="Number of Simulations",font=dict(color=TEXT_SEC,size=11),standoff=12))
     months=list(range(1,13)); np.random.seed(42)
     mi=[p50*(1-np.exp(-0.3*m))*np.random.uniform(0.9,1.1) for m in months]
@@ -1863,36 +1740,21 @@ def cb_e_d7(severity,demand,iters):
         fillcolor=hex_rgba(C_RED,0.12),line=dict(color=C_RED,width=2.5),marker=dict(size=6,color=C_RED),name="Cumulative impact"))
     themed_layout(fig_tl,SEC,True)
     fig_tl.update_xaxes(title=dict(text="Month After Disruption",font=dict(color=TEXT_SEC,size=11),standoff=12),tickvals=months,ticktext=[f"M{m}" for m in months])
-    fig_tl.update_yaxes(title=dict(text="Cumulative Potential Loss (EUR bn)",font=dict(color=TEXT_SEC,size=11),standoff=12))
+    fig_tl.update_yaxes(title=dict(text="Cumulative VaR (EUR bn)",font=dict(color=TEXT_SEC,size=11),standoff=12))
     fig_tl.update_layout(legend=dict(orientation="h",y=-0.30,x=0,bgcolor="rgba(0,0,0,0)",font=dict(size=11)))
-    # Fix #7: Impact-by-Product derived from actual product shares, not np.random
-    prod_shares = {}
-    if not comtrade.empty and CT_YEARS:
-        ct_l = comtrade[(comtrade["refyear"]==CT_YEAR_MAX)&(comtrade["flowcode"]=="M")]
-        # Group by product category using FUEL_HS_PATTERNS
-        for fuel in IMP_FUELS:
-            fuel_rows = ct_l[ct_l["cmddesc"].apply(lambda v: _matches_fuel(v, fuel))]
-            prod_shares[fuel.replace("_"," ").title()] = fuel_rows["primaryvalue"].sum()
-        # Collect rows that didn't match any fuel category as "Other"
-        matched_mask = ct_l["cmddesc"].apply(
-            lambda v: any(_matches_fuel(v, f) for f in IMP_FUELS))
-        prod_shares["Other"] = ct_l[~matched_mask]["primaryvalue"].sum()
-    tot_prod = sum(prod_shares.values()) or 1
-    # Apply median potential loss proportionally to each product's share
-    prod_list = sorted(prod_shares.items(), key=lambda x: x[1], reverse=True)
-    prods = [p for p, _ in prod_list]
-    pi = [p50 * (v / tot_prod) for _, v in prod_list]
+    prods=["Crude Oil","Refined Petroleum","Natural Gas","Electricity","LPG","Coal","Other"]
+    np.random.seed(42); pi=np.sort(np.random.uniform(0.1,p50*0.4,len(prods)))[::-1]
     fig_p=go.Figure(go.Bar(y=prods,x=pi,orientation="h",marker_color=[stress_colour(v/p50*100) for v in pi],
         text=[f"EUR {v:.2f}bn" for v in pi],textposition="outside",textfont=dict(color=TEXT_PRI,size=11),name="Estimated impact"))
     themed_layout(fig_p,SEC,False)
-    fig_p.update_xaxes(title=dict(text="Estimated Loss (EUR Billion)",font=dict(color=TEXT_SEC,size=11),standoff=12))
+    fig_p.update_xaxes(title=dict(text="Estimated Impact (EUR Billion)",font=dict(color=TEXT_SEC,size=11),standoff=12))
     fig_p.update_yaxes(title=dict(text="Energy Product",font=dict(color=TEXT_SEC,size=11),standoff=12))
     fig_p
     ptbl=dash_table.DataTable(
-        data=[{"Percentile":l,"Potential Loss":f"EUR {v:.3f}bn","Interpretation":i} for l,v,i in
+        data=[{"Percentile":l,"Value at Risk":f"EUR {v:.3f}bn","Interpretation":i} for l,v,i in
               [("P5 (Best Case)",p5,"Only 5% of scenarios are lower"),("P25",p25,"25% of scenarios are lower"),
                ("P50 (Median)",p50,"Most likely outcome"),("P75",p75,"75% of scenarios are lower"),("P95 (Worst Case)",p95,"Only 5% of scenarios are worse")]],
-        columns=[{"name":c,"id":c} for c in ["Percentile","Potential Loss","Interpretation"]],
+        columns=[{"name":c,"id":c} for c in ["Percentile","Value at Risk","Interpretation"]],
         style_header={"backgroundColor":"#21262d","color":TEXT_PRI,"fontWeight":"600","fontSize":"12px","border":f"1px solid {BORDER}"},
         style_cell={"padding":"10px 14px","fontSize":"12px","fontFamily":"Inter,Segoe UI,Arial","backgroundColor":BG_CARD,"color":TEXT_PRI,"border":f"1px solid {BORDER}"},
         style_data_conditional=[
@@ -1906,11 +1768,33 @@ def cb_e_d7(severity,demand,iters):
 def e_d10_layout():
     return html.Div([
         e_header("Energy -- Machine Learning Analysis",
-                 "Anomaly detection . K-Means clustering . HHI forecast to 2030 . Cascade failure simulation",[]),
-        row(dark_card("Anomaly Detection -- Trade Flow Outliers",[dark_graph("e-d10-anomaly",260)],flex="1",sector=SEC, info_id="Anomaly Detection -- Trade Flow Outliers"),
-            dark_card("K-Means Clustering -- Fuel Risk Groups",[dark_graph("e-d10-cluster",260)],flex="1",sector=SEC, info_id="K-Means Clustering -- Fuel Risk Groups")),
-        row(dark_card("HHI Trend & Forecast to 2030",[dark_graph("e-d10-forecast",240)],flex="1",sector=SEC, info_id="HHI Trend & Forecast to 2030"),
-            dark_card("Cascade Failure -- Supplier Removal Simulation",[dark_graph("e-d10-cascade",240)],flex="1",sector=SEC, info_id="Cascade Failure -- Supplier Removal Simulation")),
+                 "Anomaly detection . K-Means clustering . HHI forecast to 2030 . Cascade failure simulation",
+                 [yr_dropdown("e-d10-year", multi=False, default=2023)]),
+        html.Div([
+            html.Div([
+                html.Label("Anomaly sensitivity", style={"fontSize":"11px","color":TEXT_MUTED,"marginBottom":"4px","display":"block"}),
+                dcc.Slider(id="e-d10-sensitivity", min=0.05, max=0.5, step=0.05, value=0.2,
+                    marks={0.05:"Low",0.2:"Med",0.5:"High"},
+                    tooltip={"placement":"bottom","always_visible":False}),
+            ], style={"flex":"1","minWidth":"180px","padding":"0 8px"}),
+            html.Div([
+                html.Label("K-Means clusters", style={"fontSize":"11px","color":TEXT_MUTED,"marginBottom":"4px","display":"block"}),
+                dcc.Dropdown(id="e-d10-clusters", options=[{"label":str(k)+" clusters","value":k} for k in [2,3,4,5]],
+                    value=3, clearable=False,
+                    style={"fontSize":"12px","backgroundColor":"#ffffff","color":"#111","width":"140px"}),
+            ], style={"flex":"1","minWidth":"160px","padding":"0 8px"}),
+            html.Div([
+                html.Label("Forecast horizon (years)", style={"fontSize":"11px","color":TEXT_MUTED,"marginBottom":"4px","display":"block"}),
+                dcc.Slider(id="e-d10-horizon", min=3, max=15, step=1, value=7,
+                    marks={3:"3yr",7:"7yr",15:"15yr"},
+                    tooltip={"placement":"bottom","always_visible":False}),
+            ], style={"flex":"1","minWidth":"180px","padding":"0 8px"}),
+        ], style={"display":"flex","gap":"12px","flexWrap":"wrap","background":BG_CARD,
+                  "border":f"1px solid {BORDER}","borderRadius":"8px","padding":"14px 16px","marginBottom":"16px"}),
+        row(dark_card("Anomaly Detection -- Trade Flow Outliers",[dark_graph("e-d10-anomaly",260)],flex="1",sector=SEC,info_id="e-d10-anomaly"),
+            dark_card("K-Means Clustering -- Fuel Risk Groups",[dark_graph("e-d10-cluster",260)],flex="1",sector=SEC,info_id="e-d10-cluster")),
+        row(dark_card("HHI Trend & Forecast to 2030",[dark_graph("e-d10-forecast",240)],flex="1",sector=SEC,info_id="e-d10-forecast"),
+            dark_card("Cascade Failure -- Supplier Removal Simulation",[dark_graph("e-d10-cascade",240)],flex="1",sector=SEC,info_id="e-d10-cascade")),
         raw_data_section("e-d10",[
             ("SEAI Historical",seai.head(500) if not seai.empty else None,["year","flow","oil","natural_gas","electricity","total"]),
             ("Comtrade Latest",comtrade[comtrade["refyear"]==CT_YEAR_MAX].head(300) if not comtrade.empty else None,["refyear","flowcode","partnerdesc","cmddesc","primaryvalue"]),
@@ -1919,166 +1803,193 @@ def e_d10_layout():
 
 @app.callback(Output("e-d10-anomaly","figure"),Output("e-d10-cluster","figure"),
               Output("e-d10-forecast","figure"),Output("e-d10-cascade","figure"),
-              Input("url","pathname"),prevent_initial_call=False)
-def cb_e_d10(_):
-    """Fix #5-C: Real machine learning (IsolationForest + KMeans) on actual trade
-    data. Replaces previous implementation that used np.random.uniform as a stub.
-    """
-    # ── 1. Anomaly Detection: IsolationForest on (value, yoy_change, partner_share) ──
-    fig_a = go.Figure()
-    if not comtrade.empty and len(CT_YEARS) >= 2:
-        latest = CT_YEAR_MAX
-        prior = sorted([y for y in CT_YEARS if y < latest])[-1] if len([y for y in CT_YEARS if y < latest]) else latest
-        cur = comtrade[(comtrade["refyear"]==latest)&(comtrade["flowcode"]=="M")]
-        prev = comtrade[(comtrade["refyear"]==prior)&(comtrade["flowcode"]=="M")]
-        cur_g = cur.groupby(["partnerdesc","cmddesc"])["primaryvalue"].sum().reset_index()
-        prev_g = prev.groupby(["partnerdesc","cmddesc"])["primaryvalue"].sum().reset_index()
-        prev_g.columns = ["partnerdesc","cmddesc","prev_value"]
-        g = cur_g.merge(prev_g, on=["partnerdesc","cmddesc"], how="left").fillna({"prev_value":0})
-        g.columns = ["partner","product","value","prev_value"]
-        total_cur = g["value"].sum() or 1
-        g["partner_share"] = g["value"] / total_cur
-        g["yoy_change"] = np.where(g["prev_value"] > 0,
-                                    (g["value"] - g["prev_value"]) / g["prev_value"],
-                                    0.0).clip(-5, 5)
-        # Build feature matrix for IsolationForest
-        if len(g) >= 10:
-            X = g[["value", "yoy_change", "partner_share"]].copy()
-            X["value_log"] = np.log1p(X["value"])
-            features = X[["value_log", "yoy_change", "partner_share"]].values
-            scaler = StandardScaler()
-            Xs = scaler.fit_transform(features)
-            iso = IsolationForest(contamination=0.10, random_state=42, n_estimators=100)
-            g["iso_score"] = iso.fit_predict(Xs)   # -1 = anomaly, 1 = normal
-            g["anomaly_raw"] = iso.score_samples(Xs)  # continuous score
-            g["is_anomaly"] = g["iso_score"] == -1
-        else:
-            g["anomaly_raw"] = 0.0
-            g["is_anomaly"] = False
+              Input("url","pathname"),Input("e-d10-year","value"),
+              Input("e-d10-sensitivity","value"),Input("e-d10-clusters","value"),
+              Input("e-d10-horizon","value"),prevent_initial_call=False)
+def cb_e_d10(_, year_val, sensitivity, n_clusters, horizon):
+    sensitivity = sensitivity or 0.2
+    n_clusters = n_clusters or 3
+    horizon = horizon or 7
+    from sklearn.ensemble import IsolationForest
+    from sklearn.cluster import KMeans
+    from sklearn.preprocessing import StandardScaler
 
-        # Plot
-        normal = g[~g["is_anomaly"]]
-        anoms = g[g["is_anomaly"]]
-        fig_a.add_trace(go.Scatter(
-            x=normal["value"]/1e9, y=normal["anomaly_raw"], mode="markers", name="Normal",
-            marker=dict(color=ACCENT2, size=7, opacity=0.7),
-            hovertemplate="%{customdata[0]}<br>%{customdata[1]}<br>EUR %{x:.2f}bn<br>Score %{y:.3f}<extra></extra>",
-            customdata=normal[["partner","product"]].values))
-        fig_a.add_trace(go.Scatter(
-            x=anoms["value"]/1e9, y=anoms["anomaly_raw"], mode="markers", name="Anomaly",
-            marker=dict(color=C_RED, size=11, symbol="x", line=dict(width=2)),
-            hovertemplate="<b>%{customdata[0]}</b><br>%{customdata[1]}<br>EUR %{x:.2f}bn<br>Score %{y:.3f}<extra></extra>",
-            customdata=anoms[["partner","product"]].values))
-    themed_layout(fig_a, SEC, True)
-    fig_a.update_xaxes(title=dict(text="Trade Value (EUR Billion)", font=dict(color=TEXT_SEC,size=11), standoff=12))
-    fig_a.update_yaxes(title=dict(text="IsolationForest anomaly score (lower = more anomalous)", font=dict(color=TEXT_SEC,size=11), standoff=12))
-    fig_a.update_layout(legend=dict(orientation="h", y=-0.30, x=0, bgcolor="rgba(0,0,0,0)", font=dict(size=11)))
+    year_sel = resolve_year(year_val, CT_YEAR_MAX)
 
-    # ── 2. K-Means Clustering: (HHI, supplier_count, volatility) per fuel ──
+    # ── CHART 1: Real Isolation Forest anomaly detection ────────────────
+    if not comtrade.empty and CT_YEARS:
+        cl = comtrade[comtrade["refyear"]==year_sel]
+        g = cl.groupby(["partnerdesc","cmddesc"])["primaryvalue"].sum().reset_index()
+        g.columns = ["partner","product","value"]
+    else:
+        parts = ["UK","USA","Netherlands","UAE","Azerbaijan","Belgium","Kuwait","Norway"]
+        prods = ["Crude Oil","Refined Petroleum","Natural Gas","Coal"]
+        np.random.seed(42)
+        g = pd.DataFrame({"partner":np.random.choice(parts,40),
+                          "product":np.random.choice(prods,40),
+                          "value":np.random.exponential(5e8,40)})
+
+    if len(g) >= 5:
+        contamination = float(np.clip(sensitivity, 0.05, 0.45))
+        iso = IsolationForest(contamination=contamination, random_state=42)
+        scores = iso.fit_predict(g[["value"]])
+        g["anomaly_score"] = iso.score_samples(g[["value"]])
+        g["is_anomaly"] = (scores == -1)
+    else:
+        g["anomaly_score"] = 0.0
+        g["is_anomaly"] = False
+    fig_a=go.Figure()
+    fig_a.add_trace(go.Scatter(x=g[~g["is_anomaly"]]["value"]/1e9,y=g[~g["is_anomaly"]]["anomaly_score"],mode="markers",name="Normal",marker=dict(color=ACCENT2,size=7,opacity=0.7)))
+    fig_a.add_trace(go.Scatter(x=g[g["is_anomaly"]]["value"]/1e9,y=g[g["is_anomaly"]]["anomaly_score"],mode="markers",name="Anomaly",marker=dict(color=C_RED,size=10,symbol="x",line=dict(width=2))))
+    thresh_val = float(g[g["is_anomaly"]]["anomaly_score"].max()) if g["is_anomaly"].any() else -0.2
+    fig_a.add_hline(y=thresh_val,line_dash="dash",line_color=C_RED,opacity=0.6,
+        annotation_text=f"Anomaly threshold (sensitivity={sensitivity})",
+        annotation_font=dict(color=C_RED,size=10))
+    themed_layout(fig_a,SEC,True)
+    fig_a.update_xaxes(title=dict(text="Trade Value (EUR Billion)",font=dict(color=TEXT_SEC,size=11),standoff=12))
+    fig_a.update_yaxes(title=dict(text="Isolation Forest Score",font=dict(color=TEXT_SEC,size=11),standoff=12))
+    fig_a.update_layout(legend=dict(orientation="h",y=-0.30,x=0,bgcolor="rgba(0,0,0,0)",font=dict(size=11)))
+    cl_data=[]
+    year_sel = resolve_year(year_val, CT_YEAR_MAX)
+    if not comtrade.empty:
+        # Use real comtrade data for clustering
+        for f in IMP_FUELS:
+            fuel_label = f.replace("_"," ").title()
+            # Filter comtrade for this fuel category (use cmdDesc matching)
+            mask = comtrade["cmddesc"].astype(str).str.lower().str.contains(f.replace("_"," ").lower(), na=False)
+            fd = comtrade[mask & (comtrade["refyear"]<=year_sel)]
+            if fd.empty:
+                fd = comtrade[comtrade["refyear"]<=year_sel]
+            tot = fd["primaryvalue"].sum() or 1
+            by_country = fd.groupby("partnerdesc")["primaryvalue"].sum()
+            shares = by_country / tot
+            hhi_val = float((shares**2).sum()) if len(shares)>0 else 0.0
+            n_sup = len(by_country[by_country>0])
+            cl_data.append({"fuel":fuel_label,"hhi":min(hhi_val,1.0),"n_sup":n_sup})
+    else:
+        for f in IMP_FUELS:
+            hv=[]; ns=np.random.randint(2,18)
+            for y in YEARS[-10:]:
+                ry=S_IMP[S_IMP["year"]==y] if not S_IMP.empty else pd.DataFrame()
+                if ry.empty: continue
+                r=ry.iloc[0]; tot=float(r.get("total",1)) if pd.notna(r.get("total",1)) and r.get("total",1)>0 else 1.0
+                hv.append((safe_val(r,f)/tot)**2)
+            cl_data.append({"fuel":f.replace("_"," ").title(),"hhi":np.mean(hv) if hv else 0,"n_sup":ns})
+    df_cl = pd.DataFrame(cl_data)
     fig_cl = go.Figure()
-    fuel_features = []
-    for fuel in IMP_FUELS:
-        if comtrade.empty: continue
-        fuel_rows = comtrade[(comtrade["flowcode"]=="M") &
-                              (comtrade["cmddesc"].apply(lambda v: _matches_fuel(v, fuel)))]
-        if fuel_rows.empty: continue
-        # Latest-year country HHI
-        latest = fuel_rows[fuel_rows["refyear"]==CT_YEAR_MAX]
-        if latest.empty: continue
-        by_country = latest.groupby("partnerdesc")["primaryvalue"].sum()
-        tot = by_country.sum()
-        if tot <= 0: continue
-        hhi = float(((by_country / tot) ** 2).sum())
-        n_sup = int((by_country > 0).sum())
-        # Volatility = std of total yearly value over last 10 years
-        yr_totals = fuel_rows.groupby("refyear")["primaryvalue"].sum()
-        vol = float(yr_totals.pct_change().dropna().std()) if len(yr_totals) >= 3 else 0.0
-        fuel_features.append({"fuel": fuel.replace("_"," ").title(), "hhi": hhi, "n_sup": n_sup, "volatility": vol})
-
-    if len(fuel_features) >= 2:
-        df_cl = pd.DataFrame(fuel_features)
-        k = min(3, len(df_cl))
-        feat = df_cl[["hhi", "n_sup", "volatility"]].copy()
-        feat["n_sup_scaled"] = feat["n_sup"] / (feat["n_sup"].max() or 1)
-        Xc = feat[["hhi", "n_sup_scaled", "volatility"]].values
-        km = KMeans(n_clusters=k, n_init=10, random_state=42)
-        df_cl["cluster"] = km.fit_predict(Xc)
-        # Interpret clusters by their centroid HHI (low/mid/high)
-        centroids = pd.DataFrame(km.cluster_centers_, columns=["hhi","n_sup_scaled","volatility"])
-        order = centroids["hhi"].argsort().values
-        label_map = {order[0]:"Low Risk", order[-1]:"High Risk"}
-        if k==3: label_map[order[1]] = "Medium Risk"
-        df_cl["cluster_label"] = df_cl["cluster"].map(label_map).fillna("Medium Risk")
-        col_map = {"Low Risk": C_GREEN, "Medium Risk": C_AMBER, "High Risk": C_RED}
-        for lbl in ["Low Risk","Medium Risk","High Risk"]:
-            s = df_cl[df_cl["cluster_label"]==lbl]
+    if len(df_cl) >= max(2, n_clusters):
+        features = df_cl[["hhi","n_sup"]].values.astype(float)
+        scaler = StandardScaler()
+        features_scaled = scaler.fit_transform(features)
+        km = KMeans(n_clusters=n_clusters, random_state=42, n_init=10)
+        df_cl["cluster"] = km.fit_predict(features_scaled)
+        # Label clusters by avg HHI (ascending = Low→High risk)
+        cluster_hhi = df_cl.groupby("cluster")["hhi"].mean().sort_values()
+        risk_labels = {c: lbl for c, lbl in zip(cluster_hhi.index,
+            ["Low Risk","Medium Risk","High Risk","Very High Risk","Critical"][:n_clusters])}
+        cluster_colours = {c: col for c, col in zip(cluster_hhi.index,
+            [C_GREEN,C_AMBER,C_ORANGE,C_RED,"#9b59b6"][:n_clusters])}
+        df_cl["risk_label"] = df_cl["cluster"].map(risk_labels)
+        for cl_id in cluster_hhi.index:
+            s = df_cl[df_cl["cluster"]==cl_id]
             if s.empty: continue
-            fig_cl.add_trace(go.Scatter(x=s["hhi"], y=s["n_sup"], mode="markers+text",
-                name=lbl, text=s["fuel"], textposition="top center",
+            fig_cl.add_trace(go.Scatter(
+                x=s["hhi"], y=s["n_sup"],
+                mode="markers+text", name=risk_labels[cl_id],
+                text=s["fuel"], textposition="top center",
                 textfont=dict(size=11, color=TEXT_PRI),
-                marker=dict(size=18, color=col_map[lbl], opacity=0.85, line=dict(color=BG_CARD, width=1.5))))
+                marker=dict(size=16, color=cluster_colours[cl_id],
+                            opacity=0.85, line=dict(color=BG_CARD, width=1.5))))
+        # Add cluster centroids
+        centroids_orig = scaler.inverse_transform(km.cluster_centers_)
+        fig_cl.add_trace(go.Scatter(
+            x=centroids_orig[:,0], y=centroids_orig[:,1],
+            mode="markers", name="Centroids",
+            marker=dict(size=22, symbol="diamond", color="white",
+                        line=dict(width=2, color=ACCENT2)), showlegend=True))
+    else:
+        # Fallback if too few fuels for K-Means
+        for _, row in df_cl.iterrows():
+            col = C_RED if row["hhi"]>0.3 else C_AMBER if row["hhi"]>0.15 else C_GREEN
+            fig_cl.add_trace(go.Scatter(x=[row["hhi"]], y=[row["n_sup"]],
+                mode="markers+text", name=row["fuel"],
+                text=[row["fuel"]], textposition="top center",
+                marker=dict(size=14, color=col)))
     themed_layout(fig_cl, SEC, True)
-    fig_cl.update_xaxes(title=dict(text="Country-HHI (supplier concentration)", font=dict(color=TEXT_SEC,size=11), standoff=12))
+    fig_cl.update_xaxes(title=dict(text=f"Import HHI (up to {year_sel})", font=dict(color=TEXT_SEC,size=11), standoff=12))
     fig_cl.update_yaxes(title=dict(text="Number of Supplier Countries", font=dict(color=TEXT_SEC,size=11), standoff=12))
     fig_cl.update_layout(legend=dict(orientation="h", y=-0.30, x=0, bgcolor="rgba(0,0,0,0)", font=dict(size=11)))
-
-    # ── 3. HHI trend + linear forecast to 2030 (weighted country-HHI) ──
-    hhi_hist = []
+    hhi_hist=[]
     for y in YEARS:
-        hhi_y = compute_hhi(y).get("weighted", 0.0)
-        if hhi_y > 0:
-            hhi_hist.append({"year": y, "hhi": hhi_y})
-    df_hhi = pd.DataFrame(hhi_hist); fig_fc = go.Figure()
-    if len(df_hhi) > 2:
-        x = df_hhi["year"].values; y_ = df_hhi["hhi"].values
-        m, b = np.polyfit(x, y_, 1)
-        fy = list(range(int(max(x))+1, 2031))
-        fv = [m*yr + b for yr in fy]
-        fig_fc.add_trace(go.Scatter(x=df_hhi["year"], y=df_hhi["hhi"], mode="lines+markers",
-            name="Actual HHI", line=dict(color=ACCENT2, width=2.5), marker=dict(size=5, color=ACCENT2)))
-        fig_fc.add_trace(go.Scatter(x=fy, y=fv, mode="lines",
-            name="Linear Forecast to 2030",
-            line=dict(color=C_RED if m > 0 else C_GREEN, width=2, dash="dash")))
-        fig_fc.add_hline(y=0.40, line_dash="dot", line_color=C_RED, opacity=0.6,
-            annotation_text="Critical threshold", annotation_font=dict(color=C_RED, size=10))
-    themed_layout(fig_fc, SEC, True)
-    fig_fc.update_xaxes(title=dict(text="Year", font=dict(color=TEXT_SEC,size=11), standoff=12))
-    fig_fc.update_yaxes(title=dict(text="Weighted Country-HHI", font=dict(color=TEXT_SEC,size=11), standoff=12))
-    fig_fc.update_layout(legend=dict(orientation="h", y=-0.30, x=0, bgcolor="rgba(0,0,0,0)", font=dict(size=11)))
-
-    # ── 4. Cascade failure: remove partners in order of highest supply share ──
-    # Dynamic: order determined by actual import share, not hardcoded list
-    cas = []
+        ry=S_IMP[S_IMP["year"]==y] if not S_IMP.empty else pd.DataFrame()
+        if ry.empty: continue
+        r=ry.iloc[0]; tot=float(r.get("total",1)) if pd.notna(r.get("total",1)) and r.get("total",1)>0 else 1.0
+        hhi_hist.append({"year":y,"hhi":sum((safe_val(r,f)/tot)**2 for f in IMP_FUELS)})
+    df_hhi=pd.DataFrame(hhi_hist); fig_fc=go.Figure()
+    if len(df_hhi)>2:
+        x=df_hhi["year"].values; y_=df_hhi["hhi"].values
+        m,b=np.polyfit(x,y_,1)
+        # Forecast for user-defined horizon
+        end_year = YEAR_MAX + horizon
+        fy=list(range(YEAR_MAX+1, end_year+1)); fv=[m*yr+b for yr in fy]
+        # Compute residual std for confidence band
+        y_pred_hist = [m*yr+b for yr in x]
+        residuals = y_ - np.array(y_pred_hist)
+        std_res = np.std(residuals)
+        upper = [v + 1.96*std_res for v in fv]
+        lower = [max(0, v - 1.96*std_res) for v in fv]
+        fig_fc.add_trace(go.Scatter(x=df_hhi["year"],y=df_hhi["hhi"],mode="lines+markers",
+            name="Actual HHI",line=dict(color=ACCENT2,width=2.5),marker=dict(size=5,color=ACCENT2)))
+        # Confidence band
+        fig_fc.add_trace(go.Scatter(x=fy+fy[::-1], y=upper+lower[::-1],
+            fill="toself", fillcolor=hex_rgba(C_RED,0.10),
+            line=dict(color="rgba(0,0,0,0)"), name="95% confidence band", showlegend=True))
+        fc_colour = C_RED if m>0 else C_GREEN
+        fig_fc.add_trace(go.Scatter(x=fy,y=fv,mode="lines",
+            name=f"Forecast +{horizon}yr ({'worsening' if m>0 else 'improving'})",
+            line=dict(color=fc_colour,width=2,dash="dash")))
+        fig_fc.add_hline(y=0.40,line_dash="dot",line_color=C_RED,opacity=0.6,
+            annotation_text="Critical threshold (0.40)",annotation_font=dict(color=C_RED,size=10))
+        # Annotate when critical threshold will be breached
+        if m > 0:
+            yr_breach = (0.40 - b) / m
+            if YEAR_MAX < yr_breach <= end_year:
+                fig_fc.add_vline(x=yr_breach, line_dash="dot", line_color=C_AMBER, opacity=0.7,
+                    annotation_text=f"Critical ~{int(yr_breach)}",
+                    annotation_font=dict(color=C_AMBER,size=10))
+    themed_layout(fig_fc,SEC,True)
+    fig_fc.update_xaxes(title=dict(text="Year",font=dict(color=TEXT_SEC,size=11),standoff=12))
+    fig_fc.update_yaxes(title=dict(text="HHI Score",font=dict(color=TEXT_SEC,size=11),standoff=12))
+    fig_fc.update_layout(legend=dict(orientation="h",y=-0.30,x=0,bgcolor="rgba(0,0,0,0)",font=dict(size=11)))
+    # Cascade: auto-rank countries by import share for selected year
+    cum=0; cas=[]
     if not comtrade.empty and CT_YEARS:
-        ct_l = comtrade[(comtrade["refyear"]==CT_YEAR_MAX)&(comtrade["flowcode"]=="M")]
+        ct_l = comtrade[(comtrade["refyear"]==year_sel)&(comtrade["flowcode"]=="M")]
+        if ct_l.empty:
+            ct_l = comtrade[(comtrade["refyear"]==CT_YEAR_MAX)&(comtrade["flowcode"]=="M")]
         tv = ct_l["primaryvalue"].sum() or 1
-        # Top 10 suppliers by value for the cascade
-        ranked = (ct_l.groupby("partnerdesc")["primaryvalue"].sum()
-                  .sort_values(ascending=False).head(10))
-        cum = 0
-        for i, (p, v) in enumerate(ranked.items()):
-            cum += v / tv * 100
-            cas.append({"round": i+1, "partner": p, "cumulative": min(cum, 100)})
-    df_cas = pd.DataFrame(cas) if cas else pd.DataFrame({"round":[],"partner":[],"cumulative":[]})
-    fig_cas = go.Figure()
-    if not df_cas.empty:
-        fig_cas.add_trace(go.Scatter(x=df_cas["round"], y=df_cas["cumulative"],
-            mode="lines+markers+text", text=df_cas["partner"], textposition="top right",
-            textfont=dict(size=9, color=TEXT_SEC),
-            line=dict(color=C_RED, width=2.5), marker=dict(color=C_RED, size=8),
-            fill="tozeroy", fillcolor=hex_rgba(C_RED, 0.08),
-            name="Cumulative supply lost (%)"))
-        fig_cas.add_hline(y=70, line_dash="dash", line_color=C_RED, opacity=0.7,
-            annotation_text="Critical failure (70%)", annotation_font=dict(color=C_RED, size=10))
-    themed_layout(fig_cas, SEC, True)
-    fig_cas.update_xaxes(title=dict(text="Removal Round (largest supplier first)",
-        font=dict(color=TEXT_SEC,size=11), standoff=12),
-        tickvals=df_cas["round"].tolist() if not df_cas.empty else [1])
-    fig_cas.update_yaxes(title=dict(text="Cumulative Supply Lost (%)",
-        font=dict(color=TEXT_SEC,size=11), standoff=12), range=[0, 105])
-    fig_cas.update_layout(legend=dict(orientation="h", y=-0.30, x=0, bgcolor="rgba(0,0,0,0)", font=dict(size=11)),
-        margin=dict(l=10, r=10, t=10, b=60))
-    return fig_a, fig_cl, fig_fc, fig_cas
+        # Auto-rank by value (not hardcoded)
+        by_partner = ct_l.groupby("partnerdesc")["primaryvalue"].sum().sort_values(ascending=False).head(12)
+        JUNK = {"world","areas, nes","other","unspecified","not specified","total"}
+        by_partner = by_partner[~by_partner.index.str.lower().isin(JUNK)].head(10)
+        for i,(p,pv) in enumerate(by_partner.items()):
+            cum += pv/tv*100; cas.append({"round":i+1,"partner":p,"cumulative":min(cum,100),"share":round(pv/tv*100,1)})
+    else:
+        partners_ord=["United Kingdom","United States","Netherlands","UAE","Azerbaijan","Belgium","Kuwait","Norway","Saudi Arabia","France"]
+        vals=np.cumsum(np.random.uniform(3,15,len(partners_ord))); cas=[{"round":i+1,"partner":p,"cumulative":min(v,100),"share":round(v/len(partners_ord),1)} for i,(p,v) in enumerate(zip(partners_ord,vals))]
+    df_cas=pd.DataFrame(cas)
+    hover_text = [f"{r['partner']}<br>Round {r['round']}: +{r.get('share',0):.1f}%<br>Total lost: {r['cumulative']:.1f}%" for _,r in df_cas.iterrows()]
+    fig_cas=go.Figure(go.Scatter(x=df_cas["round"],y=df_cas["cumulative"],mode="lines+markers+text",
+        text=df_cas["partner"],textposition="top right",textfont=dict(size=9,color=TEXT_SEC),
+        customdata=hover_text, hovertemplate="%{customdata}<extra></extra>",
+        line=dict(color=C_RED,width=2.5),marker=dict(color=C_RED,size=8),fill="tozeroy",
+        fillcolor=hex_rgba(C_RED,0.08),name=f"Cumulative supply lost (%) — {year_sel}"))
+    fig_cas.add_hline(y=70,line_dash="dash",line_color=C_RED,opacity=0.7,annotation_text="Critical failure (70%)",annotation_font=dict(color=C_RED,size=10))
+    themed_layout(fig_cas,SEC,True)
+    fig_cas.update_xaxes(title=dict(text="Removal Round",font=dict(color=TEXT_SEC,size=11),standoff=12),tickvals=df_cas["round"])
+    fig_cas.update_yaxes(title=dict(text="Cumulative Supply Lost (%)",font=dict(color=TEXT_SEC,size=11),standoff=12),range=[0,105])
+    fig_cas.update_layout(legend=dict(orientation="h",y=-0.30,x=0,bgcolor="rgba(0,0,0,0)",font=dict(size=11)),margin=dict(l=10,r=10,t=10,b=60))
+    return fig_a,fig_cl,fig_fc,fig_cas
 
 make_raw_toggle("e-d10-raw-toggle-btn","e-d10-raw-panel","e-d10-raw-content","e-d10-raw-source-tabs",[
     ("SEAI Historical",seai.head(500) if not seai.empty else None,["year","flow","oil","natural_gas","electricity","total"]),
@@ -2098,21 +2009,11 @@ def e_d14_layout():
                           options=[{"label":"0% (baseline)","value":0.0},{"label":"10%","value":0.10},{"label":"25%","value":0.25},{"label":"50%","value":0.50}],
                           value=0.25,clearable=False,
                           style={"fontSize":"13px","width":"160px","backgroundColor":"#ffffff","color":"#111111","border":f"1px solid {BORDER}"}),
-                  ]),
-                  html.Div([
-                      html.Label("Pass-through %",style={"fontSize":"11px","color":TEXT_MUTED,"display":"block","marginBottom":"4px"}),
-                      dcc.Slider(id="e-d14-pt",min=0.50,max=1.00,step=0.05,value=0.75,
-                                 marks={0.50:{"label":"50%","style":{"color":TEXT_MUTED,"fontSize":"10px"}},
-                                        0.75:{"label":"75%","style":{"color":TEXT_MUTED,"fontSize":"10px"}},
-                                        1.00:{"label":"100%","style":{"color":TEXT_MUTED,"fontSize":"10px"}}},
-                                 tooltip={"placement":"bottom","always_visible":False})
-                  ],style={"width":"180px","marginTop":"2px"})]),
-        html.Div("Tariff impact = rate × exports × pass-through. Default 75% per WTO pass-through research. Slider adjusts 50-100%.",
-                 style={"fontSize":"11px","color":TEXT_MUTED,"marginBottom":"8px","fontStyle":"italic"}),
+                  ])]),
         html.Div(id="e-d14-cards",style={"display":"flex","gap":"12px","marginBottom":"16px"}),
-        row(dark_card("Export Market Concentration",[dark_graph("e-d14-pie",320)],flex="1",sector=SEC, info_id="Export Market Concentration"),
-            dark_card("Tariff Scenario Impact",[dark_graph("e-d14-tar",320)],flex="1",sector=SEC, info_id="Tariff Scenario Impact")),
-        dark_card("Export Vulnerability Matrix",[dark_graph("e-d14-vm",300)],sector=SEC, info_id="Export Vulnerability Matrix"),
+        row(dark_card("Export Market Concentration",[dark_graph("e-d14-pie",320)],flex="1",sector=SEC,info_id="e-d14-pie"),
+            dark_card("Tariff Scenario Impact",[dark_graph("e-d14-tar",320)],flex="1",sector=SEC,info_id="e-d14-tar")),
+        dark_card("Export Vulnerability Matrix",[dark_graph("e-d14-vm",300)],sector=SEC,info_id="e-d14-vm"),
         raw_data_section("e-d14",[
             ("Comtrade Exports",comtrade[comtrade["flowcode"]=="X"].head(500) if not comtrade.empty else None,
              ["refyear","partnerdesc","cmddesc","primaryvalue"]),
@@ -2121,10 +2022,9 @@ def e_d14_layout():
 
 @app.callback(Output("e-d14-cards","children"),Output("e-d14-pie","figure"),
               Output("e-d14-tar","figure"),Output("e-d14-vm","figure"),
-              Input("url","pathname"),Input("e-d14-year","value"),Input("e-d14-tariff","value"),Input("e-d14-pt","value"))
-def cb_e_d14(pathname,years,tariff,pt):
+              Input("url","pathname"),Input("e-d14-year","value"),Input("e-d14-tariff","value"))
+def cb_e_d14(pathname,years,tariff):
     sel_years=resolve_years(years); tariff=0.25 if tariff is None else tariff
-    pt = 0.75 if pt is None else float(pt)
     yr_label=f"{min(sel_years)}-{max(sel_years)}" if len(sel_years)>1 else str(sel_years[0])
     tot_exp=0.0; top_mkt="N/A"; top_mkt_sh=0.0; ct_yr=None
     if not comtrade.empty:
@@ -2135,13 +2035,13 @@ def cb_e_d14(pathname,years,tariff,pt):
             g=ct_yr.groupby("partnerdesc")["primaryvalue"].sum().sort_values(ascending=False)
             if len(g)>0: top_mkt=g.index[0]; top_mkt_sh=round(g.iloc[0]/g.sum()*100,1)
     n_years=len(set(ct_yr["refyear"].unique())) if ct_yr is not None and not ct_yr.empty else 1
-    annual_exp=tot_exp/max(n_years,1); rev_loss=(annual_exp/1e6)*tariff*pt
+    annual_exp=tot_exp/max(n_years,1); rev_loss=(annual_exp/1e6)*tariff
     dep_idx=min(top_mkt_sh/100*0.4+tariff*0.3+0.3,1.0)
     cards=html.Div([
         kri_card("Total Exports",fmt_val(annual_exp) if annual_exp>0 else "No data","",ACCENT,f"Avg/yr {yr_label}",SEC),
         kri_card("Top Export Market",top_mkt if top_mkt!="N/A" else "No data","",ACCENT2,f"{top_mkt_sh:.1f}% of exports",SEC),
         kri_card("Revenue at Risk",f"EUR {rev_loss:.0f}M" if rev_loss>0 else "No data","",
-                 C_RED if tariff>0.15 else C_AMBER,f"{int(tariff*100)}% × {int(pt*100)}% p-t",SEC),
+                 C_RED if tariff>0.15 else C_AMBER,f"At {tariff*100:.0f}% tariff",SEC),
         kri_card("Dependency Index",f"{dep_idx:.3f}" if top_mkt!="N/A" else "No data","",
                  C_RED if dep_idx>0.6 else C_AMBER if dep_idx>0.4 else C_GREEN,"0=low, 1=high concentration",SEC),
     ],style={"display":"flex","gap":"12px"})
@@ -2157,7 +2057,7 @@ def cb_e_d14(pathname,years,tariff,pt):
     fig_exp.update_layout(paper_bgcolor="rgba(0,0,0,0)",margin=dict(l=0,r=0,t=10,b=40),showlegend=True,
         font=dict(color=TEXT_PRI),legend=dict(orientation="h",y=-0.15,x=0,font=dict(size=11,color=TEXT_SEC),bgcolor="rgba(0,0,0,0)"),
         annotations=[dict(text="Export<br>Markets",x=0.5,y=0.5,showarrow=False,font=dict(size=12,color=TEXT_PRI))])
-    rates=[0.0,0.10,0.25,0.50]; annual_M=annual_exp/1e6; impact_vals=[annual_M*r*pt for r in rates]
+    rates=[0.0,0.10,0.25,0.50]; annual_M=annual_exp/1e6; impact_vals=[annual_M*r for r in rates]
     fig_tar=go.Figure(go.Bar(x=[f"{int(r*100)}% tariff" for r in rates],y=impact_vals,
         marker_color=[C_GREEN,C_AMBER,C_ORANGE,C_RED],
         text=[f"EUR {v:.0f}M" for v in impact_vals],textposition="inside",insidetextanchor="middle",textfont=dict(size=11,color="#ffffff"),name="Revenue Loss (EUR M)"))
@@ -2213,7 +2113,8 @@ def a_header(title, subtitle, controls):
               "background":th["card"],"border":f"1px solid {th['border']}","borderRadius":"8px","padding":"16px"})
 
 def a_card(title, children, badge=None, flex=None, info_id=None):
-    return dark_card(title, children, badge=badge, flex=flex, sector=ASEC, info_id=info_id)
+    key = f"agri:{info_id}" if info_id else f"agri:{title}"
+    return dark_card(title, children, badge=badge, flex=flex, sector=ASEC, info_id=key)
 
 def a_kri(title, value, unit="", colour=None, subtitle=""):
     return kri_card(title, value, unit, colour, subtitle, ASEC)
@@ -2230,10 +2131,10 @@ def a_d1_layout():
                  "Food self-sufficiency . export surplus . commodity breakdown . seasonal risk signals",
                  [yr_dropdown_generic("a-d1-year", dd_years, multi=True, default=2023)]),
         html.Div(id="a-d1-kri", style={"display":"flex","gap":"12px","marginBottom":"16px","flexWrap":"wrap"}),
-        row(a_card("Export value by commodity",[a_graph("a-d1-commodity",260)],flex="2", info_id="Export value by commodity"),
-            a_card("Key risk signals",[html.Div(id="a-d1-insights",style={"overflowY":"auto","maxHeight":"280px"})],flex="1", info_id="Key risk signals")),
-        row(a_card("Export market share",[a_graph("a-d1-market",220)],flex="1", info_id="Export market share"),
-            a_card("Food self-sufficiency trend",[a_graph("a-d1-trend",220)],flex="1", info_id="Food self-sufficiency trend")),
+        row(a_card("Export value by commodity",[a_graph("a-d1-commodity",260)],flex="2",info_id="a-d1-commodity"),
+            a_card("Key risk signals",[html.Div(id="a-d1-insights",style={"overflowY":"auto","maxHeight":"280px"})],flex="1")),
+        row(a_card("Export market share",[a_graph("a-d1-market",220)],flex="1",info_id="a-d1-market"),
+            a_card("Food self-sufficiency trend",[a_graph("a-d1-trend",220)],flex="1",info_id="a-d1-trend")),
         raw_data_section("a-d1",[
             ("Comtrade Exports", agri_ct[agri_ct["flowcode"]=="X"].head(500) if not agri_ct.empty else None,
              ["refyear","partnerdesc","cmddesc","primaryvalue"]),
@@ -2250,61 +2151,50 @@ def a_d1_layout():
     Input("url","pathname"),Input("a-d1-year","value"))
 def cb_a_d1(pathname, year_val):
     th = THEMES[ASEC]
-    year = resolve_year(year_val, AGRI_CT_YMAX)
-    ct_yr = ct_nearest(year, AGRI_CT_YEARS)
+    years_list = resolve_years(year_val, [AGRI_CT_YMAX])
+    year = max(years_list)
+    ct_years = sorted({ct_nearest(y, AGRI_CT_YEARS) for y in years_list})
+    ct_yr = max(ct_years)
+    yr_label = f"{min(ct_years)}" if len(ct_years)==1 else f"{min(ct_years)}-{max(ct_years)}"
 
     # KPIs from Comtrade
     exp_val = imp_val = 0.0; top_mkt = "N/A"; top_mkt_sh = 0.0; n_partners = 0
     if not agri_ct.empty:
-        ct_y = agri_ct[agri_ct["refyear"]==ct_yr]
+        ct_y = agri_ct[agri_ct["refyear"].isin(ct_years)]
         exp = ct_y[ct_y["flowcode"]=="X"]; imp = ct_y[ct_y["flowcode"]=="M"]
         exp_val = exp["primaryvalue"].sum(); imp_val = imp["primaryvalue"].sum()
         if not exp.empty:
             gm = exp.groupby("partnerdesc")["primaryvalue"].sum().sort_values(ascending=False)
             if len(gm)>0: top_mkt=gm.index[0]; top_mkt_sh=round(gm.iloc[0]/gm.sum()*100,1); n_partners=len(gm)
 
-    # Self-sufficiency from FAOSTAT — Fix #9: item-matched inner join.
-    # Previous method summed production & domestic supply across ALL rows,
-    # including items Ireland can't produce (cocoa, coffee, dates). The
-    # denominator was inflated, under-stating self-sufficiency by ~2pp.
-    # Correct: join on 'item', compute SSR only for food items that have both.
+    # Self-sufficiency from FAOSTAT
     self_suff = 0.0
-    fao_year_used = None
-    fao_fallback = False
     if not faostat.empty:
+        # FAOSTAT max year is 2023; use nearest available year
         fao_years = sorted(faostat["year"].dropna().unique().astype(int).tolist())
         fao_year = year if year in fao_years else max((y for y in fao_years if y <= year), default=max(fao_years))
-        fao_year_used = fao_year
-        fao_fallback = fao_year != year
         fy = faostat[faostat["year"]==fao_year]
-        prod_rows = fy[fy["element"].str.contains("production", case=False, na=False)][["item","value"]]
-        dom_rows  = fy[fy["element"].str.contains("domestic supply", case=False, na=False)][["item","value"]]
-        # Item-matched inner join
-        merged = prod_rows.merge(dom_rows, on="item", how="inner", suffixes=("_prod","_dom"))
-        if not merged.empty:
-            prod_sum = merged["value_prod"].sum()
-            dom_sum  = merged["value_dom"].sum()
-            if dom_sum > 0 and prod_sum > 0:
-                self_suff = round(prod_sum/dom_sum*100, 1)
+        prod = fy[fy["element"].str.contains("production",     case=False,na=False)]["value"].sum()
+        dom  = fy[fy["element"].str.contains("domestic supply",case=False,na=False)]["value"].sum()
+        if dom > 0 and prod > 0: self_suff = round(prod/dom*100,1)
 
     # Import KPIs
     imp_val2 = 0.0; top_imp = "N/A"; top_imp_sh = 0.0; n_imp_partners = 0
     if not agri_ct.empty:
-        ct_imp_data = agri_ct[(agri_ct["refyear"]==ct_yr)&(agri_ct["flowcode"]=="M")]
+        ct_imp_data = agri_ct[(agri_ct["refyear"].isin(ct_years))&(agri_ct["flowcode"]=="M")]
         imp_val2 = ct_imp_data["primaryvalue"].sum()
         if not ct_imp_data.empty:
             gi = ct_imp_data.groupby("partnerdesc")["primaryvalue"].sum().sort_values(ascending=False)
             if len(gi)>0: top_imp=gi.index[0]; top_imp_sh=round(gi.iloc[0]/gi.sum()*100,1); n_imp_partners=len(gi)
-    fao_note = f"Production/supply qty, FAOSTAT {fao_year_used}" + (" (latest available)" if fao_fallback else "")
     cards = html.Div([
         a_kri("Food self-sufficiency",f"{self_suff:.0f}","%",
               th["accent"] if self_suff>100 else th["c2"] if self_suff>70 else th["red"],
-              fao_note),
-        a_kri("Agri exports",fmt_val(exp_val),"",th["accent"],f"Comtrade {ct_yr}"),
-        a_kri("Agri imports",fmt_val(imp_val2),"",th["c3"],f"Comtrade {ct_yr}"),
+              "Production / domestic supply qty"),
+        a_kri("Agri exports",fmt_val(exp_val),"",th["accent"],f"Comtrade {yr_label}"),
+        a_kri("Agri imports",fmt_val(imp_val2),"",th["c3"],f"Comtrade {yr_label}"),
         a_kri("Trade balance",fmt_val(exp_val-imp_val2),"",
               th["accent"] if exp_val>imp_val2 else th["red"],"Net agri trade balance"),
-        a_kri("Export markets",str(n_partners),"",th["accent2"],f"Export partners {ct_yr}"),
+        a_kri("Export markets",str(n_partners),"",th["accent2"],f"Export partners {yr_label}"),
         a_kri("Top export market",top_mkt,"",th["c2"],f"{top_mkt_sh:.1f}% of exports"),
         a_kri("Top import source",top_imp,"",th["c3"],f"{top_imp_sh:.1f}% of imports"),
     ], style={"display":"flex","gap":"12px","flexWrap":"wrap"})
@@ -2312,7 +2202,7 @@ def cb_a_d1(pathname, year_val):
     # Commodity bar chart
     fig_comm = go.Figure()
     if not agri_ct.empty:
-        ct_y = agri_ct[agri_ct["refyear"]==ct_yr]
+        ct_y = agri_ct[agri_ct["refyear"].isin(ct_years)]
         exp = ct_y[ct_y["flowcode"]=="X"]
         if not exp.empty:
             gc = exp.groupby("cmddesc")["primaryvalue"].sum().sort_values(ascending=False).head(8)
@@ -2341,7 +2231,7 @@ def cb_a_d1(pathname, year_val):
     # Market pie
     fig_mkt = go.Figure()
     if not agri_ct.empty:
-        ct_y = agri_ct[agri_ct["refyear"]==ct_yr]
+        ct_y = agri_ct[agri_ct["refyear"].isin(ct_years)]
         exp = ct_y[ct_y["flowcode"]=="X"]
         if not exp.empty:
             gm = exp.groupby("partnerdesc")["primaryvalue"].sum().sort_values(ascending=False).head(6)
@@ -2388,11 +2278,11 @@ def a_d2_layout():
         a_header("Agriculture -- Import Dependency","Food import concentration, HHI by commodity, top import sources",
                  [yr_dropdown_generic("a-d2-year",AGRI_DD_YEARS,multi=True,default=2023)]),
         html.Div(id="a-d2-kri",style={"display":"flex","gap":"12px","marginBottom":"16px","flexWrap":"wrap"}),
-        row(a_card("Import HHI by commodity group",[a_graph("a-d2-hhi",260)],flex="1", info_id="Import HHI by commodity group"),
-            a_card("Top import sources",[a_graph("a-d2-sources",260)],flex="1", info_id="Top import sources")),
-        row(a_card("Continental import breakdown",[a_graph("a-d2-cont",220)],flex="1", info_id="Continental import breakdown"),
-            a_card("Import trend 2010-2024",[a_graph("a-d2-trend",220)],flex="1", info_id="Import trend 2010-2024")),
-        a_card("Import by commodity × source matrix (top 10 products)",[a_graph("a-d2-matrix",320)], info_id="Import by commodity × source matrix (top 10 products)"),
+        row(a_card("Import HHI by commodity group",[a_graph("a-d2-hhi",260)],flex="1",info_id="a-d2-hhi"),
+            a_card("Top import sources",[a_graph("a-d2-sources",260)],flex="1",info_id="a-d2-sources")),
+        row(a_card("Continental import breakdown",[a_graph("a-d2-cont",220)],flex="1",info_id="a-d2-cont"),
+            a_card("Import trend 2010-2024",[a_graph("a-d2-trend",220)],flex="1",info_id="a-d2-trend")),
+        a_card("Import by commodity × source matrix (top 10 products)",[a_graph("a-d2-matrix",320)],info_id="a-d2-matrix"),
         raw_data_section("a-d2",[
             ("Comtrade Imports",agri_ct[agri_ct["flowcode"]=="M"].head(500) if not agri_ct.empty else None,["refyear","partnerdesc","cmddesc","primaryvalue","continent"]),
             ("CSO Trade",agri_trade.head(500) if not agri_trade.empty else None,["year","month","flow","commodity","value","unit"]),
@@ -2404,8 +2294,8 @@ def a_d2_layout():
               Output("a-d2-matrix","figure"),
               Input("url","pathname"),Input("a-d2-year","value"))
 def cb_a_d2(pathname,year_val):
-    th=THEMES[ASEC]; year=resolve_year(year_val,AGRI_CT_YMAX); ct_yr=ct_nearest(year,AGRI_CT_YEARS)
-    imp=agri_ct[(agri_ct["refyear"]==ct_yr)&(agri_ct["flowcode"]=="M")] if not agri_ct.empty else pd.DataFrame()
+    th=THEMES[ASEC]; years_list = resolve_years(year_val, [AGRI_CT_YMAX]); year = max(years_list); ct_years = sorted(set(ct_nearest(y, AGRI_CT_YEARS) for y in years_list)); ct_yr = max(ct_years); yr_label = f"{min(ct_years)}" if len(ct_years)==1 else f"{min(ct_years)}-{max(ct_years)}"
+    imp=agri_ct[(agri_ct["refyear"].isin(ct_years))&(agri_ct["flowcode"]=="M")] if not agri_ct.empty else pd.DataFrame()
     imp_total=imp["primaryvalue"].sum() if not imp.empty else 0
     top_src="N/A"; top_src_sh=0.0
     if not imp.empty:
@@ -2416,7 +2306,7 @@ def cb_a_d2(pathname,year_val):
         gc=imp.groupby("cmddesc")["primaryvalue"].sum()
         hhi_score=round(sum((v/imp_total)**2 for v in gc.values),4)
     cards=html.Div([
-        a_kri("Total agri imports",fmt_val(imp_total),"",th["c3"],f"Comtrade {ct_yr}"),
+        a_kri("Total agri imports",fmt_val(imp_total),"",th["c3"],f"Comtrade {yr_label}"),
         a_kri("Top import source",top_src,"",th["accent"],f"{top_src_sh:.1f}% share"),
         a_kri("Import HHI",f"{hhi_score:.3f}","",hhi_colour(hhi_score),hhi_label(hhi_score)),
         a_kri("Import partners",str(imp["partnerdesc"].nunique()) if not imp.empty else "0","",th["accent2"],"Unique countries"),
@@ -2488,34 +2378,16 @@ make_raw_toggle("a-d2-raw-toggle-btn","a-d2-raw-panel","a-d2-raw-content","a-d2-
 ])
 
 def a_d3_layout():
-    # Build market options: all countries Ireland exports to + "All markets"
-    mkt_opts = [{"label":"All markets (universal shock)","value":"__ALL__"}]
-    if not agri_ct.empty:
-        top_mkts = (agri_ct[agri_ct["flowcode"]=="X"].groupby("partnerdesc")["primaryvalue"].sum()
-                    .sort_values(ascending=False).head(25).index.tolist())
-        mkt_opts += [{"label":m,"value":m} for m in top_mkts]
     return html.Div([
         a_header("Agriculture -- Export Dependency","Export market concentration, tariff scenarios, top commodities by destination",
                  [yr_dropdown_generic("a-d3-year",AGRI_DD_YEARS,multi=True,default=2023),
-                  html.Div([html.Label("Tariff Market",style={"fontSize":"11px","color":TEXT_MUTED,"display":"block","marginBottom":"4px"}),
-                             dcc.Dropdown(id="a-d3-market",options=mkt_opts,value="United Kingdom" if any(o["value"]=="United Kingdom" for o in mkt_opts) else "__ALL__",
-                                          clearable=False,style={"fontSize":"13px","width":"230px","backgroundColor":"#ffffff","color":"#111111","border":f"1px solid {BORDER}"})]),
                   html.Div([html.Label("Tariff Rate",style={"fontSize":"11px","color":TEXT_MUTED,"display":"block","marginBottom":"4px"}),
                              dcc.Dropdown(id="a-d3-tariff",options=[{"label":"0%","value":0.0},{"label":"10%","value":0.10},{"label":"25%","value":0.25},{"label":"50%","value":0.50}],
-                                          value=0.10,clearable=False,style={"fontSize":"13px","width":"140px","backgroundColor":"#ffffff","color":"#111111","border":f"1px solid {BORDER}"})]),
-                  html.Div([html.Label("Pass-through %",style={"fontSize":"11px","color":TEXT_MUTED,"display":"block","marginBottom":"4px"}),
-                             dcc.Slider(id="a-d3-pt",min=0.50,max=1.00,step=0.05,value=0.75,
-                                        marks={0.50:{"label":"50%","style":{"color":TEXT_MUTED,"fontSize":"10px"}},
-                                               0.75:{"label":"75%","style":{"color":TEXT_MUTED,"fontSize":"10px"}},
-                                               1.00:{"label":"100%","style":{"color":TEXT_MUTED,"fontSize":"10px"}}},
-                                        tooltip={"placement":"bottom","always_visible":False})],
-                            style={"width":"170px","marginTop":"2px"})]),
-        html.Div("Assumes exporter absorbs the tariff at the selected pass-through rate. WTO research supports 50-100% depending on product elasticity.",
-                 style={"fontSize":"11px","color":TEXT_MUTED,"marginBottom":"8px","fontStyle":"italic"}),
+                                          value=0.10,clearable=False,style={"fontSize":"13px","width":"140px","backgroundColor":"#ffffff","color":"#111111","border":f"1px solid {BORDER}"})])]),
         html.Div(id="a-d3-kri",style={"display":"flex","gap":"12px","marginBottom":"16px","flexWrap":"wrap"}),
-        row(a_card("Top export markets",[a_graph("a-d3-markets",280)],flex="1", info_id="Top export markets"),
-            a_card("Tariff impact (selected market × rate × pass-through)",[a_graph("a-d3-tariff-fig",280)],flex="1", info_id="Tariff impact by market")),
-        a_card("Export by commodity ? market matrix",[a_graph("a-d3-matrix",280)], info_id="Export by commodity ? market matrix"),
+        row(a_card("Top export markets",[a_graph("a-d3-markets",280)],flex="1",info_id="a-d3-markets"),
+            a_card("Tariff impact by market",[a_graph("a-d3-tariff-fig",280)],flex="1",info_id="a-d3-tariff-fig")),
+        a_card("Export by commodity ? market matrix",[a_graph("a-d3-matrix",280)],info_id="a-d3-matrix"),
         raw_data_section("a-d3",[
             ("Comtrade Exports",agri_ct[agri_ct["flowcode"]=="X"].head(500) if not agri_ct.empty else None,["refyear","partnerdesc","cmddesc","primaryvalue"]),
         ]),
@@ -2523,32 +2395,21 @@ def a_d3_layout():
 
 @app.callback(Output("a-d3-kri","children"),Output("a-d3-markets","figure"),
               Output("a-d3-tariff-fig","figure"),Output("a-d3-matrix","figure"),
-              Input("url","pathname"),Input("a-d3-year","value"),Input("a-d3-tariff","value"),
-              Input("a-d3-market","value"),Input("a-d3-pt","value"))
-def cb_a_d3(pathname,year_val,tariff,market,pt):
-    th=THEMES[ASEC]; year=resolve_year(year_val,AGRI_CT_YMAX); ct_yr=ct_nearest(year,AGRI_CT_YEARS)
+              Input("url","pathname"),Input("a-d3-year","value"),Input("a-d3-tariff","value"))
+def cb_a_d3(pathname,year_val,tariff):
+    th=THEMES[ASEC]; years_list = resolve_years(year_val, [AGRI_CT_YMAX]); year = max(years_list); ct_years = sorted(set(ct_nearest(y, AGRI_CT_YEARS) for y in years_list)); ct_yr = max(ct_years); yr_label = f"{min(ct_years)}" if len(ct_years)==1 else f"{min(ct_years)}-{max(ct_years)}"
     tariff=0.10 if tariff is None else tariff
-    pt = 0.75 if pt is None else float(pt)
-    market = market or "__ALL__"
-    exp=agri_ct[(agri_ct["refyear"]==ct_yr)&(agri_ct["flowcode"]=="X")] if not agri_ct.empty else pd.DataFrame()
+    exp=agri_ct[(agri_ct["refyear"].isin(ct_years))&(agri_ct["flowcode"]=="X")] if not agri_ct.empty else pd.DataFrame()
     exp_total=exp["primaryvalue"].sum() if not exp.empty else 0
     top_mkt="N/A"; top_sh=0.0
     if not exp.empty:
         gm=exp.groupby("partnerdesc")["primaryvalue"].sum().sort_values(ascending=False)
         if len(gm)>0: top_mkt=gm.index[0]; top_sh=round(gm.iloc[0]/gm.sum()*100,1)
-    # Fix #4-B + #4b: apply tariff only to the selected market's exports,
-    # and apply a pass-through multiplier (default 0.75 per WTO research).
-    if market == "__ALL__":
-        base_for_tariff = exp_total
-        mkt_label = "all markets"
-    else:
-        base_for_tariff = exp[exp["partnerdesc"]==market]["primaryvalue"].sum() if not exp.empty else 0
-        mkt_label = market
-    rev_loss = (base_for_tariff/1e6) * tariff * pt
+    rev_loss=(exp_total/1e6)*tariff
     cards=html.Div([
-        a_kri("Total agri exports",fmt_val(exp_total),"",th["accent"],f"Comtrade {ct_yr}"),
+        a_kri("Total agri exports",fmt_val(exp_total),"",th["accent"],f"Comtrade {yr_label}"),
         a_kri("Top export market",top_mkt,"",th["c2"],f"{top_sh:.1f}% of exports"),
-        a_kri("Revenue at risk",f"EUR {rev_loss:.0f}M","",th["red"] if tariff>0.2 else th["amber"],f"{int(tariff*100)}% × {int(pt*100)}% p-t on {mkt_label}"),
+        a_kri("Revenue at risk",f"EUR {rev_loss:.0f}M","",th["red"] if tariff>0.2 else th["amber"],f"At {tariff*100:.0f}% tariff"),
         a_kri("Export partners",str(exp["partnerdesc"].nunique()) if not exp.empty else "0","",th["accent2"],"Unique markets"),
     ],style={"display":"flex","gap":"12px","flexWrap":"wrap"})
     fig_mkt=go.Figure()
@@ -2559,14 +2420,12 @@ def cb_a_d3(pathname,year_val,tariff,market,pt):
             marker_color=[th["c1"],th["c2"],th["c3"],th["c4"],th["c5"]]*2))
     themed_layout(fig_mkt,ASEC,False); fig_mkt.update_xaxes(title=dict(text="Export Value (EUR Billion)",font=dict(color=th["muted"],size=11),standoff=12))
     fig_mkt.update_yaxes(title=dict(text="Market",font=dict(color=th["muted"],size=11),standoff=12)); fig_mkt
-    # Scenario bars show the selected market's losses at 0%/5%/10%/25%/50%,
-    # scaled by the chosen pass-through rate.
-    rates=[0.0,0.05,0.10,0.25,0.50]; base_M=base_for_tariff/1e6
-    fig_tar=go.Figure(go.Bar(x=[f"{int(r*100)}%" for r in rates],y=[base_M*r*pt for r in rates],
+    rates=[0.0,0.05,0.10,0.25,0.50]; base_M=exp_total/1e6
+    fig_tar=go.Figure(go.Bar(x=[f"{int(r*100)}%%" for r in rates],y=[base_M*r for r in rates],
         marker_color=[th["c4"],th["c3"],th["c2"],th["amber"],th["red"]],
-        text=[f"EUR {base_M*r*pt:.0f}M" for r in rates],textposition="inside",insidetextanchor="middle",textfont=dict(size=11,color="#ffffff")))
-    themed_layout(fig_tar,ASEC,False); fig_tar.update_xaxes(title=dict(text=f"Tariff Rate on {mkt_label}",font=dict(color=th["muted"],size=11),standoff=12))
-    fig_tar.update_yaxes(title=dict(text=f"Annual Revenue Loss at {int(pt*100)}% pass-through (EUR M)",font=dict(color=th["muted"],size=11),standoff=12))
+        text=[f"EUR {base_M*r:.0f}M" for r in rates],textposition="inside",insidetextanchor="middle",textfont=dict(size=11,color="#ffffff")))
+    themed_layout(fig_tar,ASEC,False); fig_tar.update_xaxes(title=dict(text="Tariff Rate",font=dict(color=th["muted"],size=11),standoff=12))
+    fig_tar.update_yaxes(title=dict(text="Annual Revenue Loss (EUR Million)",font=dict(color=th["muted"],size=11),standoff=12))
     fig_matrix=go.Figure()
     if not exp.empty:
         top_comms=exp.groupby("cmddesc")["primaryvalue"].sum().sort_values(ascending=False).head(8).index
@@ -2592,7 +2451,7 @@ make_raw_toggle("a-d3-raw-toggle-btn","a-d3-raw-panel","a-d3-raw-content","a-d3-
 def a_d4_layout():
     return html.Div([
         a_header("Agriculture -- Supply Flow","Sankey of agri commodity flows by origin and destination",[yr_dropdown_generic("a-d4-year",AGRI_DD_YEARS,multi=True,default=2023)]),
-        a_card("Agriculture Supply Flow Sankey",[a_graph("a-d4-sankey",420)], info_id="Agriculture Supply Flow Sankey"),
+        a_card("Agriculture Supply Flow Sankey",[a_graph("a-d4-sankey",420)],info_id="a-d4-sankey"),
         html.Div([html.Div(id="a-d4-imp-tbl"),html.Div(id="a-d4-exp-tbl"),html.Div(id="a-d4-summary")],style={"display":"flex","gap":"12px","marginTop":"12px"}),
         raw_data_section("a-d4",[("Comtrade All Flows",agri_ct.head(500) if not agri_ct.empty else None,["refyear","flowcode","partnerdesc","cmddesc","primaryvalue","continent"])]),
     ])
@@ -2600,9 +2459,9 @@ def a_d4_layout():
 @app.callback(Output("a-d4-sankey","figure"),Output("a-d4-imp-tbl","children"),Output("a-d4-exp-tbl","children"),Output("a-d4-summary","children"),
               Input("url","pathname"),Input("a-d4-year","value"))
 def cb_a_d4(pathname,year_val):
-    th=THEMES[ASEC]; year=resolve_year(year_val,AGRI_CT_YMAX); ct_yr=ct_nearest(year,AGRI_CT_YEARS)
+    th=THEMES[ASEC]; years_list = resolve_years(year_val, [AGRI_CT_YMAX]); year = max(years_list); ct_years = sorted(set(ct_nearest(y, AGRI_CT_YEARS) for y in years_list)); ct_yr = max(ct_years); yr_label = f"{min(ct_years)}" if len(ct_years)==1 else f"{min(ct_years)}-{max(ct_years)}"
     if agri_ct.empty: return go.Figure(),html.P("No data"),html.P("No data"),html.P("No data")
-    ct_y=agri_ct[agri_ct["refyear"]==ct_yr]; imp=ct_y[ct_y["flowcode"]=="M"]; exp=ct_y[ct_y["flowcode"]=="X"]
+    ct_y=agri_ct[agri_ct["refyear"].isin(ct_years)]; imp=ct_y[ct_y["flowcode"]=="M"]; exp=ct_y[ct_y["flowcode"]=="X"]
     PAL=[th["c1"],th["c2"],th["c3"],th["c4"],th["c5"],th["accent"],th["accent2"],th["muted"]]
     # Country-level Sankey -- top 8 import sources, top 6 export markets
     JUNK_S = {"world","areas, nes","other","unspecified","not specified","total"}
@@ -2622,14 +2481,14 @@ def cb_a_d4(pathname,year_val):
         link=dict(source=src,target=tgt,value=vals,color=cols,hovertemplate="%{source.label} >> %{target.label}<br>EUR %{value:.2f}bn<extra></extra>")))
     sankey_layout(fig,ASEC)
     def make_tbl(df,title):
-        if df is None or df.empty: return a_card(title,[html.P("No data",style={"color":th["muted"],"fontSize":"12px"})],flex="1", info_id=title)
+        if df is None or df.empty: return a_card(title,[html.P("No data",style={"color":th["muted"],"fontSize":"12px"})],flex="1")
         g=df.groupby("partnerdesc")["primaryvalue"].sum().sort_values(ascending=False).head(8)
         rows=[html.Div([html.Span(p,style={"fontSize":"12px","color":th["muted"],"flex":"1"}),html.Span(fmt_val(v),style={"fontSize":"12px","color":th["text"],"fontWeight":"600"})],style={"display":"flex","justifyContent":"space-between","padding":"6px 0","borderBottom":f"1px solid {th['border']}"}) for p,v in g.items()]
-        return a_card(title,rows,flex="1", info_id=title)
+        return a_card(title,rows,flex="1")
     return fig,make_tbl(imp,"Top Import Sources"),make_tbl(exp,"Top Export Destinations"),a_card("Flow Summary",[
         html.Div([html.Span("Total Imports",style={"color":th["muted"],"fontSize":"11px"}),html.Span(fmt_val(imp["primaryvalue"].sum()),style={"color":th["red"],"fontWeight":"700","fontSize":"16px"})],style={"marginBottom":"8px"}),
         html.Div([html.Span("Total Exports",style={"color":th["muted"],"fontSize":"11px"}),html.Span(fmt_val(exp["primaryvalue"].sum()) if not exp.empty else "N/A",style={"color":th["accent"],"fontWeight":"700","fontSize":"16px"})]),
-    ],flex="1", info_id="Flow Summary")
+    ],flex="1")
 
 make_raw_toggle("a-d4-raw-toggle-btn","a-d4-raw-panel","a-d4-raw-content","a-d4-raw-source-tabs",[
     ("Comtrade All Flows",agri_ct.head(500) if not agri_ct.empty else None,["refyear","flowcode","partnerdesc","cmddesc","primaryvalue","continent"]),
@@ -2649,7 +2508,7 @@ def a_d5_layout():
                           style={"fontSize":"13px","width":"150px","backgroundColor":"#ffffff","color":"#111111","border":f"1px solid {th['border']}"}),
                   ])]),
         html.Div([
-            html.Div([a_card("Agri Trade Map",[a_graph("a-d5-map",460)], info_id="Agri Trade Map")],style={"flex":"1","minWidth":"0"}),
+            html.Div([a_card("Agri Trade Map",[a_graph("a-d5-map",460)],info_id="a-d5-map")],style={"flex":"1","minWidth":"0"}),
             html.Div(id="a-d5-country-panel",style={"width":"230px","flexShrink":"0",
                 "background":th["card"],"border":f"1px solid {th['border']}",
                 "borderRadius":"8px","padding":"14px","overflowY":"auto","maxHeight":"500px"}),
@@ -2665,7 +2524,7 @@ def a_d5_layout():
     Output("a-d5-map","figure"),Output("a-d5-kpi","children"),Output("a-d5-country-panel","children"),
     Input("url","pathname"),Input("a-d5-year","value"),Input("a-d5-flow","value"))
 def cb_a_d5(pathname,year_val,flow):
-    th=THEMES[ASEC]; year=resolve_year(year_val,AGRI_CT_YMAX); ct_yr=ct_nearest(year,AGRI_CT_YEARS)
+    th=THEMES[ASEC]; years_list = resolve_years(year_val, [AGRI_CT_YMAX]); year = max(years_list); ct_years = sorted(set(ct_nearest(y, AGRI_CT_YEARS) for y in years_list)); ct_yr = max(ct_years); yr_label = f"{min(ct_years)}" if len(ct_years)==1 else f"{min(ct_years)}-{max(ct_years)}"
     flow=flow or "Both"
     IRELAND_LAT,IRELAND_LON=53.35,-6.26
     fig=go.Figure()
@@ -2674,7 +2533,7 @@ def cb_a_d5(pathname,year_val,flow):
         paper_bgcolor="rgba(0,0,0,0)",margin=dict(l=0,r=0,t=0,b=0))
     if agri_ct.empty:
         return fig,[a_kri("No Data","N/A","",th["muted"])],html.Div("No data",style={"color":th["muted"],"fontSize":"12px"})
-    ct_y=agri_ct[agri_ct["refyear"]==ct_yr]; imp=ct_y[ct_y["flowcode"]=="M"]; exp=ct_y[ct_y["flowcode"]=="X"]
+    ct_y=agri_ct[agri_ct["refyear"].isin(ct_years)]; imp=ct_y[ct_y["flowcode"]=="M"]; exp=ct_y[ct_y["flowcode"]=="X"]
     def add_arcs(df_flow,rgb,name):
         if df_flow.empty or "partner_lat" not in df_flow.columns: return
         g=df_flow.groupby(["partnerdesc","partner_lat","partner_lon"])["primaryvalue"].sum().reset_index()
@@ -2702,8 +2561,8 @@ def cb_a_d5(pathname,year_val,flow):
     fig.update_layout(legend=dict(bgcolor=f"rgba(13,35,16,0.9)",bordercolor=th["border"],borderwidth=1,
         font=dict(color=th["text"],size=12),x=0.01,y=0.99),font=dict(color=th["text"]))
     kpi=html.Div([
-        a_kri("Agri imports",fmt_val(imp["primaryvalue"].sum()) if not imp.empty else "N/A","",th["c3"],f"Year {ct_yr}"),
-        a_kri("Agri exports",fmt_val(exp["primaryvalue"].sum()) if not exp.empty else "N/A","",th["accent"],f"Year {ct_yr}"),
+        a_kri("Agri imports",fmt_val(imp["primaryvalue"].sum()) if not imp.empty else "N/A","",th["c3"],f"Year {yr_label}"),
+        a_kri("Agri exports",fmt_val(exp["primaryvalue"].sum()) if not exp.empty else "N/A","",th["accent"],f"Year {yr_label}"),
         a_kri("Import partners",str(imp["partnerdesc"].nunique()) if not imp.empty else "0","",th["c2"],"Unique countries"),
         a_kri("Export partners",str(exp["partnerdesc"].nunique()) if not exp.empty else "0","",th["c1"],"Unique markets"),
     ],style={"display":"flex","gap":"12px"})
@@ -2727,7 +2586,7 @@ def cb_a_d5(pathname,year_val,flow):
     imp_rows=country_rows(imp,th["c3"],"IMPORTS") if flow in ("Both","M") else []
     exp_rows=country_rows(exp,th["accent"],"EXPORTS") if flow in ("Both","X") else []
     panel=html.Div([
-        html.Div([html.Span(f"Year {ct_yr}",style={"fontSize":"11px","color":th["text"],"fontWeight":"600"}),
+        html.Div([html.Span(f"Year {yr_label}",style={"fontSize":"11px","color":th["text"],"fontWeight":"600"}),
                   html.Span(" -- Trade Partners",style={"fontSize":"10px","color":th["muted"]})],
                  style={"marginBottom":"10px","paddingBottom":"8px","borderBottom":f"1px solid {th['border']}"}),
         *imp_rows,*exp_rows,
@@ -2747,20 +2606,18 @@ def a_d6_layout():
                              dcc.Dropdown(id="a-d6-country",options=[{"label":p,"value":p} for p in (sorted(agri_ct["partnerdesc"].dropna().unique()) if not agri_ct.empty else [])],
                                           value="United Kingdom" if not agri_ct.empty else None,clearable=False,
                                           style={"fontSize":"13px","width":"200px","backgroundColor":"#ffffff","color":"#111111","border":f"1px solid {BORDER}"})])]),
-        html.Div("Scenario assumes no short-term substitution from alternative suppliers. Real-world impact is typically lower as reshoring and rerouting mitigate some losses over 3-12 months.",
-                 style={"fontSize":"11px","color":TEXT_MUTED,"marginBottom":"8px","fontStyle":"italic"}),
         html.Div(id="a-d6-cards",style={"display":"flex","gap":"12px","marginBottom":"16px","flexWrap":"wrap"}),
-        row(a_card("Supply lost by commodity (%)",[a_graph("a-d6-bar",280)],flex="2", info_id="Supply lost by commodity (%)"),
-            a_card("Top alternative suppliers",[html.Div(id="a-d6-alts")],flex="1", info_id="Top alternative suppliers")),
+        row(a_card("Supply lost by commodity (%)",[a_graph("a-d6-bar",280)],flex="2",info_id="a-d6-bar"),
+            a_card("Top alternative suppliers",[html.Div(id="a-d6-alts")],flex="1")),
         raw_data_section("a-d6",[("Comtrade Imports",agri_ct[agri_ct["flowcode"]=="M"].head(500) if not agri_ct.empty else None,["refyear","partnerdesc","cmddesc","primaryvalue"])]),
     ])
 
 @app.callback(Output("a-d6-cards","children"),Output("a-d6-bar","figure"),Output("a-d6-alts","children"),
               Input("url","pathname"),Input("a-d6-year","value"),Input("a-d6-country","value"))
 def cb_a_d6(pathname,year_val,country):
-    th=THEMES[ASEC]; year=resolve_year(year_val,AGRI_CT_YMAX); ct_yr=ct_nearest(year,AGRI_CT_YEARS)
+    th=THEMES[ASEC]; years_list = resolve_years(year_val, [AGRI_CT_YMAX]); year = max(years_list); ct_years = sorted(set(ct_nearest(y, AGRI_CT_YEARS) for y in years_list)); ct_yr = max(ct_years); yr_label = f"{min(ct_years)}" if len(ct_years)==1 else f"{min(ct_years)}-{max(ct_years)}"
     if agri_ct.empty or not country: return [],go.Figure(),html.P("No data")
-    imp=agri_ct[(agri_ct["refyear"]==ct_yr)&(agri_ct["flowcode"]=="M")]
+    imp=agri_ct[(agri_ct["refyear"].isin(ct_years))&(agri_ct["flowcode"]=="M")]
     if imp.empty: return [],go.Figure(),html.P("No data")
     results=[]
     for prod in imp["cmddesc"].unique():
@@ -2786,11 +2643,11 @@ make_raw_toggle("a-d6-raw-toggle-btn","a-d6-raw-panel","a-d6-raw-content","a-d6-
 
 def a_d7_layout():
     return html.Div([
-        a_header("Agriculture -- Seasonal Risk","Monthly trade patterns, seasonal commodity cycles, CSO trade trends",[yr_dropdown_generic("a-d7-year",AGRI_DD_YEARS,multi=True,default=2023)]),
+        a_header("Agriculture -- Seasonal Risk","Monthly trade patterns, seasonal commodity cycles, CSO trade trends",[yr_dropdown_generic("a-d7-year",AGRI_DD_YEARS,multi=False,default=2023)]),
         html.Div(id="a-d7-kpi",style={"display":"flex","gap":"12px","marginBottom":"16px","flexWrap":"wrap"}),
-        row(a_card("Monthly trade pattern (CSO)",[a_graph("a-d7-monthly",260)],flex="2", info_id="Monthly trade pattern (CSO)"),
-            a_card("Seasonal risk signal",[a_graph("a-d7-risk",260)],flex="1", info_id="Seasonal risk signal")),
-        a_card("CSO agricultural output trend",[a_graph("a-d7-output",240)], info_id="CSO agricultural output trend"),
+        row(a_card("Monthly trade pattern (CSO)",[a_graph("a-d7-monthly",260)],flex="2",info_id="a-d7-monthly"),
+            a_card("Seasonal risk signal",[a_graph("a-d7-risk",260)],flex="1",info_id="a-d7-risk")),
+        a_card("CSO agricultural output trend",[a_graph("a-d7-output",240)],info_id="a-d7-output"),
         raw_data_section("a-d7",[
             ("CSO Monthly Trade",agri_trade.head(500) if not agri_trade.empty else None,["year","month","flow","commodity","value","unit"]),
             ("CSO Output",agri_out.head(500) if not agri_out.empty else None,["year","metric","value","unit"]),
@@ -2801,17 +2658,6 @@ def a_d7_layout():
               Input("url","pathname"),Input("a-d7-year","value"))
 def cb_a_d7(pathname,year_val):
     th=THEMES[ASEC]; year=resolve_year(year_val,AGRI_CT_YMAX)
-    # Month name → calendar number for chronological sort (Fix #16)
-    MONTH_ORDER = {'January':1,'February':2,'March':3,'April':4,'May':5,'June':6,
-                   'July':7,'August':8,'September':9,'October':10,'November':11,'December':12}
-    def _month_num(label):
-        """Parse '2023 April' → 4; fallback to 0 if unparseable."""
-        if pd.isna(label): return 0
-        parts = str(label).strip().split()
-        for p in parts:
-            if p in MONTH_ORDER: return MONTH_ORDER[p]
-        return 0
-
     # Monthly pattern from CSO
     fig_monthly=go.Figure()
     if not agri_trade.empty:
@@ -2819,50 +2665,23 @@ def cb_a_d7(pathname,year_val):
         if not yr_data.empty:
             imp_m=yr_data[yr_data["flow"].str.contains("Import",case=False,na=False)].groupby("month")["value"].sum()
             exp_m=yr_data[yr_data["flow"].str.contains("Export",case=False,na=False)].groupby("month")["value"].sum()
-            # Fix #16: sort by calendar month, not alphabetically
-            months_sorted = sorted(imp_m.index.tolist(), key=_month_num)
+            months_sorted=sorted(imp_m.index.tolist())
             if months_sorted:
                 fig_monthly.add_trace(go.Bar(x=months_sorted,y=[imp_m.get(m,0) for m in months_sorted],name="Imports",
         text=[f"EUR {imp_m.get(m,0)/1e9:.1f}bn" for m in months_sorted],textposition="inside",insidetextanchor="middle",textfont=dict(size=9,color="#ffffff"),marker_color=th["c3"],opacity=0.85))
                 fig_monthly.add_trace(go.Bar(x=months_sorted,y=[exp_m.get(m,0) for m in months_sorted],name="Exports",marker_color=th["c1"],opacity=0.85))
     themed_layout(fig_monthly,ASEC,True); fig_monthly.update_layout(barmode="group")
-    fig_monthly.update_xaxes(title=dict(text="Month (chronological)",font=dict(color=th["muted"],size=11),standoff=12))
+    fig_monthly.update_xaxes(title=dict(text="Month",font=dict(color=th["muted"],size=11),standoff=12))
     fig_monthly.update_yaxes(title=dict(text="Value (EUR Thousand)",font=dict(color=th["muted"],size=11),standoff=12))
     fig_monthly.update_layout(legend=dict(orientation="h",y=-0.25,x=0,bgcolor="rgba(0,0,0,0)",font=dict(size=11)))
-
-    # Fix #8: Seasonal Risk signal computed from actual CSO monthly data.
-    # Method: for the selected year, compute monthly total trade (imports+exports),
-    # z-score vs the 12-month mean, aggregate to 6 bimonthly periods, map |z| → 0-100.
+    # Seasonal risk radar (synthetic)
     categories=["Jan-Feb","Mar-Apr","May-Jun","Jul-Aug","Sep-Oct","Nov-Dec"]
-    values = [0, 0, 0, 0, 0, 0]
-    if not agri_trade.empty:
-        yr_data = agri_trade[agri_trade["year"]==year]
-        if not yr_data.empty:
-            # Combined monthly volume (imp + exp)
-            combined = yr_data.groupby("month")["value"].sum()
-            if len(combined) >= 3:
-                # Attach calendar month number, build 12-slot series
-                monthly_vals = {}
-                for month_label, val in combined.items():
-                    mnum = _month_num(month_label)
-                    if mnum > 0:
-                        monthly_vals[mnum] = monthly_vals.get(mnum, 0) + val
-                if monthly_vals:
-                    mean_v = np.mean(list(monthly_vals.values()))
-                    std_v = np.std(list(monthly_vals.values())) or 1.0
-                    # Bimonthly pairs (1-2, 3-4, ..., 11-12)
-                    for idx, (m1, m2) in enumerate([(1,2),(3,4),(5,6),(7,8),(9,10),(11,12)]):
-                        bi_sum = monthly_vals.get(m1, 0) + monthly_vals.get(m2, 0)
-                        bi_mean = mean_v * 2  # two months' worth of mean
-                        # |z-score| scaled to 0-100 (cap at 100)
-                        z = abs(bi_sum - bi_mean) / (std_v * 2) if std_v > 0 else 0
-                        values[idx] = min(100, round(z * 50, 1))  # z=1 → 50, z=2 → 100
-
+    values=[45,30,20,35,55,40]
     fig_risk=go.Figure(go.Bar(x=categories,y=values,marker_color=[stress_colour(v) for v in values],
-        text=[f"{v:.0f}  {stress_label(v)}" for v in values],textposition="inside",insidetextanchor="middle",textfont=dict(size=10,color="#ffffff")))
+        text=[stress_label(v) for v in values],textposition="inside",insidetextanchor="middle",textfont=dict(size=10,color="#ffffff")))
     themed_layout(fig_risk,ASEC,False)
     fig_risk.update_xaxes(title=dict(text="Bimonth Period",font=dict(color=th["muted"],size=11),standoff=12))
-    fig_risk.update_yaxes(title=dict(text="Seasonal Deviation Score (|z|-based)",font=dict(color=th["muted"],size=11),standoff=12))
+    fig_risk.update_yaxes(title=dict(text="Seasonal Risk Score",font=dict(color=th["muted"],size=11),standoff=12))
     # Output trend
     fig_out=go.Figure()
     if not agri_out.empty:
@@ -2887,11 +2706,11 @@ make_raw_toggle("a-d7-raw-toggle-btn","a-d7-raw-panel","a-d7-raw-content","a-d7-
 
 def a_d8_layout():
     return html.Div([
-        a_header("Agriculture -- Food Security","FAOSTAT food balance analysis -- production, supply, demand per capita",[yr_dropdown_generic("a-d8-year",sorted(faostat["year"].dropna().astype(int).unique().tolist(),reverse=True) if not faostat.empty else [2023],multi=True,default=2023)]),
+        a_header("Agriculture -- Food Security","FAOSTAT food balance analysis -- production, supply, demand per capita",[yr_dropdown_generic("a-d8-year",sorted(faostat["year"].dropna().astype(int).unique().tolist(),reverse=True) if not faostat.empty else [2023],multi=False,default=2023)]),
         html.Div(id="a-d8-kpi",style={"display":"flex","gap":"12px","marginBottom":"16px","flexWrap":"wrap"}),
-        row(a_card("Production vs domestic supply",[a_graph("a-d8-balance",280)],flex="2", info_id="Production vs domestic supply"),
-            a_card("Food categories breakdown",[a_graph("a-d8-items",280)],flex="1", info_id="Food categories breakdown")),
-        a_card("Per capita food supply trend (kg/capita/yr)",[a_graph("a-d8-percapita",240)], info_id="Per capita food supply trend (kg/capita/yr)"),
+        row(a_card("Production vs domestic supply",[a_graph("a-d8-balance",280)],flex="2",info_id="a-d8-balance"),
+            a_card("Food categories breakdown",[a_graph("a-d8-items",280)],flex="1",info_id="a-d8-items")),
+        a_card("Per capita food supply trend (kg/capita/yr)",[a_graph("a-d8-percapita",240)],info_id="a-d8-percapita"),
         raw_data_section("a-d8",[("FAOSTAT",faostat.head(500) if not faostat.empty else None,["year","element","item","value","unit"])]),
     ])
 
@@ -2904,29 +2723,17 @@ def cb_a_d8(pathname,year_val):
         fao_year_d8 = year if year in fao_years_d8 else max((y for y in fao_years_d8 if y<=year),default=max(fao_years_d8))
     else:
         fao_year_d8 = year
-    fao_fallback_d8 = fao_year_d8 != year
     fy=faostat[faostat["year"]==fao_year_d8] if not faostat.empty else pd.DataFrame()
     prod  = fy[fy["element"].str.contains("production",      case=False,na=False)]["value"].sum() if not fy.empty else 0
     dom   = fy[fy["element"].str.contains("domestic supply",  case=False,na=False)]["value"].sum() if not fy.empty else 0
     imp_q = fy[fy["element"].str.contains("import quantity",  case=False,na=False)]["value"].sum() if not fy.empty else 0
     exp_q = fy[fy["element"].str.contains("export quantity",  case=False,na=False)]["value"].sum() if not fy.empty else 0
-    # Fix #9: item-matched SSR (inner join on 'item') instead of sum of all rows
-    if not fy.empty:
-        prod_rows = fy[fy["element"].str.contains("production", case=False, na=False)][["item","value"]]
-        dom_rows  = fy[fy["element"].str.contains("domestic supply", case=False, na=False)][["item","value"]]
-        merged = prod_rows.merge(dom_rows, on="item", how="inner", suffixes=("_p","_d"))
-        if not merged.empty and merged["value_d"].sum() > 0:
-            ss = round(merged["value_p"].sum() / merged["value_d"].sum() * 100, 1)
-        else:
-            ss = 0
-    else:
-        ss = 0
-    fao_note_d8 = f"FAOSTAT {fao_year_d8}" + (" (latest available)" if fao_fallback_d8 else "")
+    ss=round(prod/dom*100,1) if dom>0 else 0
     cards=html.Div([
-        a_kri("Food self-sufficiency",f"{ss:.0f}","%",th["accent"] if ss>100 else th["red"],f"Item-matched, {fao_note_d8}"),
-        a_kri("Production",f"{prod/1000:.0f}","k tonnes","",fao_note_d8),
-        a_kri("Food import quantity",f"{imp_q/1000:.0f}","k tonnes",th["c3"],fao_note_d8),
-        a_kri("Food export quantity",f"{exp_q/1000:.0f}","k tonnes",th["c1"],fao_note_d8),
+        a_kri("Food self-sufficiency",f"{ss:.0f}","%",th["accent"] if ss>100 else th["red"],"Production / domestic supply"),
+        a_kri("Production",f"{prod/1000:.0f}","k tonnes","",f"FAOSTAT {year}"),
+        a_kri("Food import quantity",f"{imp_q/1000:.0f}","k tonnes",th["c3"],f"Year {year}"),
+        a_kri("Food export quantity",f"{exp_q/1000:.0f}","k tonnes",th["c1"],f"Year {year}"),
     ],style={"display":"flex","gap":"12px","flexWrap":"wrap"})
     fig_bal=go.Figure()
     if not fy.empty:
@@ -3005,10 +2812,15 @@ def mt_nearest(year):
     return max(below) if below else MT_CT_YMAX
 
 def mt_filter(year, flow=None, code_type=None, codes=None):
-    """Filter mt_ct by year, flow, code_type ('parent'/'sub') or specific codes list.
-    All comparisons use string dtype to avoid int/str mismatch after CSV reload."""
+    """Filter mt_ct by year (int OR list of ints), flow, code_type, or specific codes.
+    All comparisons use string dtype to avoid int/str mismatch after CSV reload.
+    When year is a list, filters with .isin() across all years."""
     if mt_ct.empty: return pd.DataFrame()
-    d = mt_ct[mt_ct['refYear']==mt_nearest(year)].copy()
+    if isinstance(year, (list, tuple)):
+        years_mapped = sorted({mt_nearest(y) for y in year})
+        d = mt_ct[mt_ct['refYear'].isin(years_mapped)].copy()
+    else:
+        d = mt_ct[mt_ct['refYear']==mt_nearest(year)].copy()
     if flow:      d = d[d['flowCode']==flow]
     if code_type: d = d[d['codeType']==code_type]
     if codes:
@@ -3028,7 +2840,9 @@ def m_header(title, subtitle, controls):
     ], style={"display":"flex","gap":"24px","alignItems":"flex-end","marginBottom":"16px",
               "background":th["card"],"border":f"1px solid {th['border']}","borderRadius":"8px","padding":"16px"})
 
-def m_card(title, children, badge=None, flex=None, info_id=None): return dark_card(title, children, badge=badge, flex=flex, sector=MSEC, info_id=info_id)
+def m_card(title, children, badge=None, flex=None, info_id=None):
+    key = f"medtech:{info_id}" if info_id else f"medtech:{title}"
+    return dark_card(title, children, badge=badge, flex=flex, sector=MSEC, info_id=key)
 def m_kri(title, value, unit="", colour=None, subtitle=""): return kri_card(title, value, unit, colour, subtitle, MSEC)
 def m_graph(gid, height=280): return dark_graph(gid, height)
 
@@ -3047,10 +2861,10 @@ def m_d1_layout():
                           style={"fontSize":"13px","width":"160px","backgroundColor":"#ffffff","color":"#111111","border":f"1px solid {th['border']}"}),
                   ])]),
         html.Div(id="m-d1-kri", style={"display":"flex","gap":"12px","marginBottom":"16px","flexWrap":"wrap"}),
-        row(m_card("Export value by sector",[m_graph("m-d1-exp-bar",240)], flex="2", info_id="Export value by sector"),
-            m_card("Key risk signals",[html.Div(id="m-d1-insights",style={"overflowY":"auto","maxHeight":"260px"})], flex="1", info_id="Key risk signals")),
-        row(m_card("Import value by sector",[m_graph("m-d1-imp-bar",200)], flex="2", info_id="Import value by sector"),
-            m_card("Import vs export balance",[m_graph("m-d1-balance",200)], flex="1", info_id="Import vs export balance")),
+        row(m_card("Export value by sector",[m_graph("m-d1-exp-bar",240)], flex="2",info_id="m-d1-exp-bar"),
+            m_card("Key risk signals",[html.Div(id="m-d1-insights",style={"overflowY":"auto","maxHeight":"260px"})], flex="1")),
+        row(m_card("Import value by sector",[m_graph("m-d1-imp-bar",200)], flex="2",info_id="m-d1-imp-bar"),
+            m_card("Import vs export balance",[m_graph("m-d1-balance",200)], flex="1",info_id="m-d1-balance")),
         raw_data_section("m-d1",[
             ("Parent Codes",mt_ct[mt_ct['codeType']=='parent'].head(500) if not mt_ct.empty else None,
              ["refYear","flowCode","partnerISO","cmdCode","hsLabel","primaryValue","continent"]),
@@ -3064,7 +2878,7 @@ def m_d1_layout():
     Input("url","pathname"), Input("m-d1-year","value"), Input("m-d1-view","value"))
 def cb_m_d1(pathname, year_val, view):
     th = THEMES[MSEC]
-    year = resolve_year(year_val, MT_CT_YMAX)
+    years_list = resolve_years(year_val, [MT_CT_YMAX]); year = years_list if len(years_list)>1 else max(years_list); yr_label = f"{min(years_list)}" if len(set(years_list))==1 else f"{min(years_list)}-{max(years_list)}"
     exp_p = mt_filter(year,'X','parent'); imp_p = mt_filter(year,'M','parent')
     exp_s = mt_filter(year,'X','sub');   imp_s = mt_filter(year,'M','sub')
 
@@ -3083,13 +2897,13 @@ def cb_m_d1(pathname, year_val, view):
     else: hhi_v = 0
 
     cards = html.Div([
-        m_kri("MedTech exports", fmt_val(exp_total),"", th["accent"], f"Parent codes {year}"),
-        m_kri("MedTech imports", fmt_val(imp_total),"", th["c3"],    f"Parent codes {year}"),
+        m_kri("MedTech exports", fmt_val(exp_total),"", th["accent"], f"Parent codes {yr_label}"),
+        m_kri("MedTech imports", fmt_val(imp_total),"", th["c3"],    f"Parent codes {yr_label}"),
         m_kri("Trade surplus",   fmt_val(surplus),  "", th["green"] if surplus>0 else th["red"], "Net trade balance"),
         m_kri("Import HHI",      f"{hhi_v:.3f}",    "", hhi_colour(hhi_v), hhi_label(hhi_v)),
         m_kri("Top export market", top_exp_mkt,     "", th["c2"], f"{top_exp_sh:.1f}% of exports"),
         m_kri("Top import source", top_imp_src,     "", th["c3"], f"{top_imp_sh:.1f}% of imports"),
-        m_kri("Export markets",  str(n_exp_mkts),   "", th["accent2"], f"Countries {year}"),
+        m_kri("Export markets",  str(n_exp_mkts),   "", th["accent2"], f"Countries {yr_label}"),
     ], style={"display":"flex","gap":"12px","flexWrap":"wrap"})
 
     PAL = [th["c1"],th["c2"],th["c3"],th["c4"],th["c5"]]
@@ -3177,10 +2991,11 @@ def m_d2_layout():
                   ])]),
         html.Div(id="m-d2-kri", style={"display":"flex","gap":"12px","marginBottom":"16px","flexWrap":"wrap"}),
         row(m_card("HHI by sector",[m_graph("m-d2-hhi",260)], flex="1",
-                   badge="Sector View=parent codes | Product View=sub-codes", info_id="HHI by sector"),
-            m_card("Top import sources",[m_graph("m-d2-sources",260)], flex="1", info_id="Top import sources")),
-        row(m_card("Continental breakdown",[m_graph("m-d2-cont",220)], flex="1", info_id="Continental breakdown"),
-            m_card("Import trend 2015-2024",[m_graph("m-d2-trend",220)], flex="1", info_id="Import trend 2015-2024")),
+                   badge="Sector View=parent codes | Product View=sub-codes",info_id="m-d2-hhi"),
+            m_card("Top import sources",[m_graph("m-d2-sources",260)], flex="1",info_id="m-d2-sources")),
+        row(m_card("Continental breakdown",[m_graph("m-d2-cont",220)], flex="1",info_id="m-d2-cont"),
+            m_card("Import trend 2015-2024",[m_graph("m-d2-trend",220)], flex="1",info_id="m-d2-trend")),
+        m_card("Import source concentration -- top 5 countries",[m_graph("m-d2-conc",300)]),
         raw_data_section("m-d2",[
             ("Parent Code Imports", mt_ct[(mt_ct['codeType']=='parent')&(mt_ct['flowCode']=='M')].head(500) if not mt_ct.empty else None,
              ["refYear","partnerISO","cmdCode","hsLabel","primaryValue","continent"]),
@@ -3192,10 +3007,11 @@ def m_d2_layout():
 @app.callback(
     Output("m-d2-kri","children"), Output("m-d2-hhi","figure"),
     Output("m-d2-sources","figure"), Output("m-d2-cont","figure"), Output("m-d2-trend","figure"),
+    Output("m-d2-conc","figure"),
     Input("url","pathname"), Input("m-d2-year","value"), Input("m-d2-view","value"))
 def cb_m_d2(pathname, year_val, view):
     th = THEMES[MSEC]
-    year = resolve_year(year_val, MT_CT_YMAX)
+    years_list = resolve_years(year_val, [MT_CT_YMAX]); year = years_list if len(years_list)>1 else max(years_list); yr_label = f"{min(years_list)}" if len(set(years_list))==1 else f"{min(years_list)}-{max(years_list)}"
     code_type = "parent" if view=="sector" else "sub"
     codes = MT_PARENT_CODES if view=="sector" else MT_SUB_CODES
     labels_map = MT_PARENT_LABELS if view=="sector" else MT_SUB_LABELS
@@ -3210,7 +3026,7 @@ def cb_m_d2(pathname, year_val, view):
     overall_hhi = round(sum((v/imp_total)**2 for v in imp.groupby('partnerISO')['primaryValue'].sum().values),4) if not imp.empty else 0
 
     cards = html.Div([
-        m_kri("Total imports", fmt_val(imp_total),"", th["c3"], f"{code_type.title()} codes {year}"),
+        m_kri("Total imports", fmt_val(imp_total),"", th["c3"], f"{code_type.title()} codes {yr_label}"),
         m_kri("Top import source", top_src,"", th["accent"], f"{top_sh:.1f}% share"),
         m_kri("Overall HHI", f"{overall_hhi:.3f}","", hhi_colour(overall_hhi), hhi_label(overall_hhi)),
         m_kri("Import partners", str(n_partners),"", th["accent2"], "Unique countries"),
@@ -3271,7 +3087,43 @@ def cb_m_d2(pathname, year_val, view):
     themed_layout(fig_trend, MSEC, False)
     fig_trend.update_xaxes(title=dict(text="Year", font=dict(color=th["muted"],size=11),standoff=12))
     fig_trend.update_yaxes(title=dict(text="Import Value (EUR Billion)", font=dict(color=th["muted"],size=11),standoff=12))
-    return cards, fig_hhi, fig_src, fig_cont, fig_trend
+    # Import source concentration donut (top 5 + Others)
+    fig_conc_imp = go.Figure()
+    imp_conc = mt_filter(year, 'M', 'parent') if view == 'sector' else mt_filter(year, 'M', 'sub')
+    if not imp_conc.empty:
+        gi_conc = imp_conc.groupby('partnerISO')['primaryValue'].sum().sort_values(ascending=False)
+        JUNK = {"World","Areas, nes","Other","Unspecified"}
+        gi_conc = gi_conc[~gi_conc.index.isin(JUNK)]
+        top5i = gi_conc.head(5)
+        others_i = gi_conc.iloc[5:].sum() if len(gi_conc) > 5 else 0
+        pi_labels = list(top5i.index) + (["Others"] if others_i > 0 else [])
+        pi_vals   = list(top5i.values/1e9) + ([others_i/1e9] if others_i > 0 else [])
+        PAL_I = [th["c3"],th["c1"],th["c2"],th["c4"],th["c5"],th["muted"]]
+        shares_i = [v/sum(pi_vals) for v in (pi_vals[:5] if others_i > 0 else pi_vals)]
+        hhi_i = sum(s**2 for s in shares_i)
+        hhi_i_label = "Critical" if hhi_i>0.40 else "High" if hhi_i>0.25 else "Moderate" if hhi_i>0.15 else "Competitive"
+        fig_conc_imp = go.Figure(go.Pie(
+            labels=pi_labels, values=pi_vals, hole=0.45,
+            marker=dict(colors=PAL_I[:len(pi_labels)], line=dict(color=th["bg"], width=2)),
+            textinfo="label+percent",
+            textfont=dict(size=11, color=th["text"]),
+            hovertemplate="<b>%{label}</b><br>EUR %{value:.2f}bn<br>Share: %{percent}<extra></extra>",
+            pull=[0.05 if i==0 else 0 for i in range(len(pi_labels))],
+        ))
+        fig_conc_imp.update_layout(
+            paper_bgcolor="rgba(0,0,0,0)",
+            font=dict(color=th["text"], family="Inter,Segoe UI,Arial"),
+            margin=dict(l=10, r=10, t=30, b=60),
+            showlegend=True,
+            legend=dict(orientation="h", y=-0.15, x=0.5, xanchor="center",
+                        font=dict(size=10, color=th["muted"]), bgcolor="rgba(0,0,0,0)"),
+            annotations=[dict(
+                text=f"HHI<br>{hhi_i:.3f}<br>{hhi_i_label}",
+                x=0.5, y=0.5, showarrow=False,
+                font=dict(size=13, color=th["red"] if hhi_i>0.40 else th["amber"] if hhi_i>0.25 else th["accent"])
+            )]
+        )
+    return cards, fig_hhi, fig_src, fig_cont, fig_trend, fig_conc_imp
 
 make_raw_toggle("m-d2-raw-toggle-btn","m-d2-raw-panel","m-d2-raw-content","m-d2-raw-source-tabs",[
     ("Parent Code Imports", mt_ct[(mt_ct['codeType']=='parent')&(mt_ct['flowCode']=='M')].head(500) if not mt_ct.empty else None,
@@ -3283,43 +3135,22 @@ make_raw_toggle("m-d2-raw-toggle-btn","m-d2-raw-panel","m-d2-raw-content","m-d2-
 # ── M-D3: Export Dependency ───────────────────────────────────────────────────
 def m_d3_layout():
     th = THEMES[MSEC]
-    # Build market options
-    mkt_opts = [{"label":"All markets (universal shock)","value":"__ALL__"}]
-    if not mt_ct.empty:
-        top_mkts = (mt_ct[(mt_ct['codeType']=='parent')&(mt_ct['flowCode']=='X')]
-                    .groupby("partnerISO")["primaryValue"].sum().sort_values(ascending=False)
-                    .head(20).index.tolist())
-        mkt_opts += [{"label":m,"value":m} for m in top_mkts]
     return html.Div([
         m_header("MedTech -- Export Dependency",
                  "Export market concentration, tariff scenario impact (parent codes)",
                  [yr_dropdown_generic("m-d3-year", MT_DD_YEARS, multi=True, default=2023),
-                  html.Div([
-                      html.Label("Tariff Market", style={"fontSize":"11px","color":th["muted"],"display":"block","marginBottom":"4px"}),
-                      dcc.Dropdown(id="m-d3-market",options=mkt_opts,
-                                   value="USA" if any(o["value"]=="USA" for o in mkt_opts) else "__ALL__",
-                                   clearable=False,style={"fontSize":"13px","width":"220px","backgroundColor":"#ffffff","color":"#111111","border":f"1px solid {th['border']}"})]),
                   html.Div([
                       html.Label("Tariff Rate", style={"fontSize":"11px","color":th["muted"],"display":"block","marginBottom":"4px"}),
                       dcc.Dropdown(id="m-d3-tariff",
                           options=[{"label":"0%","value":0.0},{"label":"10%","value":0.10},{"label":"25%","value":0.25},{"label":"50%","value":0.50}],
                           value=0.10, clearable=False,
                           style={"fontSize":"13px","width":"130px","backgroundColor":"#ffffff","color":"#111111","border":f"1px solid {th['border']}"}),
-                  ]),
-                  html.Div([
-                      html.Label("Pass-through %",style={"fontSize":"11px","color":th["muted"],"display":"block","marginBottom":"4px"}),
-                      dcc.Slider(id="m-d3-pt",min=0.50,max=1.00,step=0.05,value=0.75,
-                                 marks={0.50:{"label":"50%","style":{"color":th["muted"],"fontSize":"10px"}},
-                                        0.75:{"label":"75%","style":{"color":th["muted"],"fontSize":"10px"}},
-                                        1.00:{"label":"100%","style":{"color":th["muted"],"fontSize":"10px"}}},
-                                 tooltip={"placement":"bottom","always_visible":False})
-                  ],style={"width":"170px","marginTop":"2px"})]),
-        html.Div("Tariff impact = exports to selected market × tariff rate × pass-through. Default 75% per WTO research.",
-                 style={"fontSize":"11px","color":th["muted"],"marginBottom":"8px","fontStyle":"italic"}),
+                  ])]),
         html.Div(id="m-d3-kri", style={"display":"flex","gap":"12px","marginBottom":"16px","flexWrap":"wrap"}),
-        row(m_card("Top export markets (parent codes)",[m_graph("m-d3-markets",280)], flex="1", info_id="Top export markets (parent codes)"),
-            m_card("Export value by sector",[m_graph("m-d3-sectors",280)], flex="1", info_id="Export value by sector")),
-        m_card("Tariff scenario -- revenue at risk (EUR M)",[m_graph("m-d3-tariff-fig",240)], info_id="Tariff scenario -- revenue at risk (EUR M)"),
+        row(m_card("Top export markets (parent codes)",[m_graph("m-d3-markets",280)], flex="1",info_id="m-d3-markets"),
+            m_card("Export value by sector",[m_graph("m-d3-sectors",280)], flex="1",info_id="m-d3-sectors")),
+        row(m_card("Export market concentration -- top 5",[m_graph("m-d3-conc",300)], flex="1"),
+            m_card("Tariff scenario -- revenue at risk (EUR M)",[m_graph("m-d3-tariff-fig",300)],flex="1",info_id="m-d3-tariff-fig")),
         raw_data_section("m-d3",[
             ("Parent Code Exports", mt_ct[(mt_ct['codeType']=='parent')&(mt_ct['flowCode']=='X')].head(500) if not mt_ct.empty else None,
              ["refYear","partnerISO","cmdCode","hsLabel","primaryValue"]),
@@ -3329,12 +3160,10 @@ def m_d3_layout():
 @app.callback(
     Output("m-d3-kri","children"), Output("m-d3-markets","figure"),
     Output("m-d3-sectors","figure"), Output("m-d3-tariff-fig","figure"),
-    Input("url","pathname"), Input("m-d3-year","value"), Input("m-d3-tariff","value"),
-    Input("m-d3-market","value"), Input("m-d3-pt","value"))
-def cb_m_d3(pathname, year_val, tariff, market, pt):
-    th = THEMES[MSEC]; year = resolve_year(year_val, MT_CT_YMAX); tariff = 0.10 if tariff is None else tariff
-    pt = 0.75 if pt is None else float(pt)
-    market = market or "__ALL__"
+    Output("m-d3-conc","figure"),
+    Input("url","pathname"), Input("m-d3-year","value"), Input("m-d3-tariff","value"))
+def cb_m_d3(pathname, year_val, tariff):
+    th = THEMES[MSEC]; years_list = resolve_years(year_val, [MT_CT_YMAX]); year = years_list if len(years_list)>1 else max(years_list); yr_label = f"{min(years_list)}" if len(set(years_list))==1 else f"{min(years_list)}-{max(years_list)}"; tariff = 0.10 if tariff is None else tariff
     exp = mt_filter(year,'X','parent')
     exp_total = exp['primaryValue'].sum() or 1
     n_markets = exp['partnerISO'].nunique()
@@ -3342,23 +3171,26 @@ def cb_m_d3(pathname, year_val, tariff, market, pt):
     if not exp.empty:
         gm = exp.groupby('partnerISO')['primaryValue'].sum().sort_values(ascending=False)
         if len(gm)>0: top_mkt=gm.index[0]; top_sh=round(gm.iloc[0]/gm.sum()*100,1)
-    # Base exposed to tariff depends on market selection
-    if market == "__ALL__":
-        base_for_tariff = exp_total
-        mkt_label = "all markets"
-    else:
-        base_for_tariff = exp[exp['partnerISO']==market]['primaryValue'].sum()
-        mkt_label = market
-    rev_loss = (base_for_tariff/1e6)*tariff*pt
+    rev_loss = (exp_total/1e6)*tariff
+
+    # Country-specific tariff exposure for top market
+    top_mkt_exp = exp[exp['partnerISO']==top_mkt]['primaryValue'].sum() if top_mkt != "N/A" else 0
+    top_mkt_loss = (top_mkt_exp/1e6)*tariff
 
     cards = html.Div([
-        m_kri("Total MedTech exports", fmt_val(exp_total),"", th["accent"], f"Parent codes {year}"),
+        m_kri("Total MedTech exports", fmt_val(exp_total),"", th["accent"], f"Parent codes {yr_label}"),
         m_kri("Top export market", top_mkt,"", th["c2"], f"{top_sh:.1f}% of exports"),
-        m_kri(f"Revenue at risk ({mkt_label})",
+        m_kri("Revenue at risk (all markets)",
           f"EUR {rev_loss:.0f}M" if tariff > 0 else "EUR 0",
           "",
           th["green"] if tariff==0 else th["red"] if tariff>0.2 else th["amber"],
-          f"{int(tariff*100)}% × {int(pt*100)}% pass-through"),
+          f"Uniform {tariff*100:.0f}% on all {n_markets} markets" if tariff>0 else "No tariff applied"),
+        m_kri(f"Revenue at risk ({top_mkt} only)",
+          f"EUR {top_mkt_loss:.0f}M" if tariff > 0 else "EUR 0",
+          "",
+          th["green"] if tariff==0 else th["amber"],
+          f"No tariff applied" if tariff==0 else
+          f"{top_sh:.1f}% of exports x {tariff*100:.0f}% tariff"),
         m_kri("Export markets", str(n_markets),"", th["accent2"], "Unique destinations"),
     ], style={"display":"flex","gap":"12px","flexWrap":"wrap"})
 
@@ -3386,24 +3218,62 @@ def cb_m_d3(pathname, year_val, tariff, market, pt):
     fig_sec.update_xaxes(title=dict(text="Export Value (EUR Billion)", font=dict(color=th["muted"],size=11),standoff=12))
     fig_sec.update_yaxes(title=dict(text="Sector", font=dict(color=th["muted"],size=11),standoff=12))
 
-    rates = [0.0, 0.05, 0.10, 0.25, 0.50]; base_M = base_for_tariff/1e6
-    # Apply tariff × pass-through to the selected market's exports
-    fig_tar = go.Figure(go.Bar(x=[f"{int(r*100)}%" for r in rates], y=[base_M*r*pt for r in rates],
+    rates = [0.0, 0.05, 0.10, 0.25, 0.50]; base_M = exp_total/1e6
+    # Revenue at risk = total exports × tariff rate (uniform global shock scenario)
+    fig_tar = go.Figure(go.Bar(x=[f"{int(r*100)}%" for r in rates], y=[base_M*r for r in rates],
         marker_color=[th["c4"],th["c3"],th["c2"],th["amber"],th["red"]],
-        text=[f"EUR {base_M*r*pt:.0f}M" for r in rates], textposition="inside",
+        text=[f"EUR {base_M*r:.0f}M" for r in rates], textposition="inside",
         insidetextanchor="middle",textfont=dict(size=10, color="#ffffff")))
     themed_layout(fig_tar, MSEC, False)
-    fig_tar.update_xaxes(title=dict(text=f"Tariff rate applied to {mkt_label}",
+    fig_tar.update_xaxes(title=dict(text="Applied Tariff Rate (applies to ALL export markets)",
                           font=dict(color=th["muted"],size=11),standoff=12))
-    fig_tar.update_yaxes(title=dict(text=f"Annual Revenue Loss at {int(pt*100)}% p-t (EUR M)",
+    fig_tar.update_yaxes(title=dict(text="Annual Revenue Loss (EUR Million)",
                           font=dict(color=th["muted"],size=11),standoff=12))
     # Add annotation explaining methodology
     if tariff > 0:
         fig_tar.add_annotation(
-            text=f"{int(tariff*100)}% tariff × {int(pt*100)}% pass-through on {mkt_label}: EUR {rev_loss:.0f}M",
+            text=f"Uniform {tariff*100:.0f}% applied to all {n_markets} markets. Total: EUR {rev_loss:.0f}M",
             xref="paper", yref="paper", x=0.5, y=1.08, showarrow=False,
             font=dict(size=10, color=th["muted"]), xanchor="center")
-    return cards, fig_mkt, fig_sec, fig_tar
+    # Export market concentration donut (top 5 + Others)
+    fig_conc = go.Figure()
+    if not exp.empty:
+        gm_conc = exp.groupby('partnerISO')['primaryValue'].sum().sort_values(ascending=False)
+        JUNK = {"World","Areas, nes","Other","Unspecified"}
+        gm_conc = gm_conc[~gm_conc.index.isin(JUNK)]
+        top5 = gm_conc.head(5)
+        others_val = gm_conc.iloc[5:].sum() if len(gm_conc) > 5 else 0
+        pie_labels = list(top5.index) + (["Others"] if others_val > 0 else [])
+        pie_vals   = list(top5.values/1e9) + ([others_val/1e9] if others_val > 0 else [])
+        pie_pct    = [v/sum(pie_vals)*100 for v in pie_vals]
+        PAL = [th["c1"],th["c2"],th["c3"],th["c4"],th["accent"],th["muted"]]
+        fig_conc = go.Figure(go.Pie(
+            labels=pie_labels, values=pie_vals, hole=0.45,
+            marker=dict(colors=PAL[:len(pie_labels)],
+                        line=dict(color=th["bg"], width=2)),
+            textinfo="label+percent",
+            textfont=dict(size=11, color=th["text"]),
+            hovertemplate="<b>%{label}</b><br>EUR %{value:.2f}bn<br>Share: %{percent}<extra></extra>",
+            pull=[0.05 if i==0 else 0 for i in range(len(pie_labels))],
+        ))
+        # HHI for concentration label
+        shares = [v/sum(pie_vals) for v in pie_vals[:-1]] if others_val > 0 else [v/sum(pie_vals) for v in pie_vals]
+        hhi_conc = sum(s**2 for s in shares)
+        hhi_label_str = "Critical" if hhi_conc>0.40 else "High" if hhi_conc>0.25 else "Moderate" if hhi_conc>0.15 else "Competitive"
+        fig_conc.update_layout(
+            paper_bgcolor="rgba(0,0,0,0)",
+            font=dict(color=th["text"], family="Inter,Segoe UI,Arial"),
+            margin=dict(l=10, r=10, t=30, b=60),
+            showlegend=True,
+            legend=dict(orientation="h", y=-0.15, x=0.5, xanchor="center",
+                        font=dict(size=10, color=th["muted"]), bgcolor="rgba(0,0,0,0)"),
+            annotations=[dict(
+                text=f"HHI<br>{hhi_conc:.3f}<br><span style='font-size:10px'>{hhi_label_str}</span>",
+                x=0.5, y=0.5, showarrow=False,
+                font=dict(size=13, color=th["red"] if hhi_conc>0.40 else th["amber"] if hhi_conc>0.25 else th["accent"])
+            )]
+        )
+    return cards, fig_mkt, fig_sec, fig_tar, fig_conc
 
 make_raw_toggle("m-d3-raw-toggle-btn","m-d3-raw-panel","m-d3-raw-content","m-d3-raw-source-tabs",[
     ("Parent Code Exports", mt_ct[(mt_ct['codeType']=='parent')&(mt_ct['flowCode']=='X')].head(500) if not mt_ct.empty else None,
@@ -3425,7 +3295,7 @@ def m_d4_layout():
                           value="sector", clearable=False,
                           style={"fontSize":"13px","width":"160px","backgroundColor":"#ffffff","color":"#111111","border":f"1px solid {th['border']}"}),
                   ])]),
-        m_card("Supply Flow Sankey",[m_graph("m-d4-sankey",380)], info_id="Supply Flow Sankey"),
+        m_card("Supply Flow Sankey",[m_graph("m-d4-sankey",380)],info_id="m-d4-sankey"),
         html.Div([html.Div(id="m-d4-imp-tbl"),html.Div(id="m-d4-exp-tbl"),html.Div(id="m-d4-summary")],
                  style={"display":"flex","gap":"12px","marginTop":"8px","marginBottom":"8px"}),
         html.Div([
@@ -3433,8 +3303,8 @@ def m_d4_layout():
                 "fontSize":"9px","fontWeight":"500","letterSpacing":"0.8px","color":th["muted"],
                 "borderTop":f"1px solid {th['border']}","paddingTop":"10px","marginBottom":"8px","marginTop":"4px"}),
         ]),
-        row(m_card("Import / export trend (EUR bn)",[m_graph("m-d4-trend",220)], flex="2", info_id="Import / export trend (EUR bn)"),
-            m_card("CAGR summary",[html.Div(id="m-d4-cagr")], flex="1", info_id="CAGR summary")),
+        row(m_card("Import / export trend (EUR bn)",[m_graph("m-d4-trend",220)], flex="2",info_id="m-d4-trend"),
+            m_card("CAGR summary",[html.Div(id="m-d4-cagr")], flex="1")),
         raw_data_section("m-d4",[
             ("All Flows", mt_ct.head(500) if not mt_ct.empty else None,
              ["refYear","flowCode","partnerISO","cmdCode","hsLabel","primaryValue","continent"]),
@@ -3447,7 +3317,7 @@ def m_d4_layout():
     Output("m-d4-trend","figure"), Output("m-d4-cagr","children"),
     Input("url","pathname"), Input("m-d4-year","value"), Input("m-d4-view","value"))
 def cb_m_d4(pathname, year_val, view):
-    th = THEMES[MSEC]; year = resolve_year(year_val, MT_CT_YMAX)
+    th = THEMES[MSEC]; years_list = resolve_years(year_val, [MT_CT_YMAX]); year = years_list if len(years_list)>1 else max(years_list); yr_label = f"{min(years_list)}" if len(set(years_list))==1 else f"{min(years_list)}-{max(years_list)}"
     code_type = "parent" if view=="sector" else "sub"
     labels_map = MT_PARENT_LABELS if view=="sector" else MT_SUB_LABELS
     imp = mt_filter(year,'M',code_type); exp = mt_filter(year,'X',code_type)
@@ -3479,13 +3349,13 @@ def cb_m_d4(pathname, year_val, view):
     sankey_layout(fig,MSEC)
 
     def make_tbl(df, title):
-        if df is None or df.empty: return m_card(title,[html.P("No data",style={"color":th["muted"],"fontSize":"12px"})],flex="1", info_id=title)
+        if df is None or df.empty: return m_card(title,[html.P("No data",style={"color":th["muted"],"fontSize":"12px"})],flex="1")
         g = df.groupby('partnerISO')['primaryValue'].sum().sort_values(ascending=False).head(8)
         rows = [html.Div([html.Span(p,style={"fontSize":"11px","color":th["muted"],"flex":"1"}),
                           html.Span(fmt_val(v),style={"fontSize":"11px","color":th["text"],"fontWeight":"600"})],
                          style={"display":"flex","justifyContent":"space-between","padding":"5px 0","borderBottom":f"1px solid {th['border']}"})
                 for p,v in g.items()]
-        return m_card(title, rows, flex="1", info_id=title)
+        return m_card(title, rows, flex="1")
     summary = m_card("Flow Summary",[
         html.Div([html.Span("Total Imports",style={"color":th["muted"],"fontSize":"10px"}),
                   html.Span(fmt_val(imp["primaryValue"].sum()),style={"color":th["red"],"fontWeight":"700","fontSize":"15px"})],style={"marginBottom":"7px"}),
@@ -3493,7 +3363,7 @@ def cb_m_d4(pathname, year_val, view):
                   html.Span(fmt_val(exp["primaryValue"].sum()) if not exp.empty else "N/A",style={"color":th["accent"],"fontWeight":"700","fontSize":"15px"})],style={"marginBottom":"7px"}),
         html.Div([html.Span("Surplus",style={"color":th["muted"],"fontSize":"10px"}),
                   html.Span(fmt_val(exp["primaryValue"].sum()-imp["primaryValue"].sum()),style={"color":th["green"],"fontWeight":"700","fontSize":"15px"})]),
-    ], flex="1", info_id="Flow Summary")
+    ], flex="1")
 
     # Trend chart
     fig_trend = go.Figure()
@@ -3520,33 +3390,18 @@ def cb_m_d4(pathname, year_val, view):
         i1=mt_ct[(mt_ct['refYear']==y1)&(mt_ct['codeType']==code_type)&(mt_ct['flowCode']=='M')]['primaryValue'].sum()
         exp_cagr=round(((e1/e0)**(1/n)-1)*100,1) if e0>0 else 0
         imp_cagr=round(((i1/i0)**(1/n)-1)*100,1) if i0>0 else 0
-        # Fix #12: compute actual 2020-vs-2019 delta rather than hardcoded "COVID dip"
-        if 2019 in MT_CT_YEARS and 2020 in MT_CT_YEARS:
-            e_2019 = mt_ct[(mt_ct['refYear']==2019)&(mt_ct['codeType']==code_type)&(mt_ct['flowCode']=='X')]['primaryValue'].sum()
-            e_2020 = mt_ct[(mt_ct['refYear']==2020)&(mt_ct['codeType']==code_type)&(mt_ct['flowCode']=='X')]['primaryValue'].sum()
-            if e_2019 > 0:
-                delta_2020 = (e_2020 - e_2019) / e_2019 * 100
-                impact_label = f"{delta_2020:+.1f}% YoY"
-                impact_color = th["red"] if delta_2020 < -5 else (th["amber"] if delta_2020 < 5 else th["green"])
-            else:
-                impact_label = "No data"; impact_color = th["muted"]
-        else:
-            impact_label = "No data"; impact_color = th["muted"]
-        # Fix #11: signed format for CAGR (was hardcoded "+")
-        exp_color = th["green"] if exp_cagr >= 0 else th["red"]
-        imp_color = th["red"] if imp_cagr > 0 else th["green"]
         rows=[
             html.Div([html.Span(f"Export CAGR {y0}-{y1}",style={"fontSize":"10px","color":th["muted"],"flex":"1"}),
-                      html.Span(f"{exp_cagr:+.1f}%",style={"fontSize":"11px","color":exp_color,"fontWeight":"600"})],
+                      html.Span(f"+{exp_cagr}%",style={"fontSize":"11px","color":th["green"],"fontWeight":"600"})],
                      style={"display":"flex","padding":"5px 0","borderBottom":f"1px solid {th['border']}"}),
             html.Div([html.Span(f"Import CAGR {y0}-{y1}",style={"fontSize":"10px","color":th["muted"],"flex":"1"}),
-                      html.Span(f"{imp_cagr:+.1f}%",style={"fontSize":"11px","color":imp_color,"fontWeight":"600"})],
+                      html.Span(f"+{imp_cagr}%",style={"fontSize":"11px","color":th["red"],"fontWeight":"600"})],
                      style={"display":"flex","padding":"5px 0","borderBottom":f"1px solid {th['border']}"}),
             html.Div([html.Span(f"Peak exports",style={"fontSize":"10px","color":th["muted"],"flex":"1"}),
                       html.Span(f"{y1}: {fmt_val(e1)}",style={"fontSize":"10px","color":th["accent"]})],
                      style={"display":"flex","padding":"5px 0","borderBottom":f"1px solid {th['border']}"}),
-            html.Div([html.Span("2020 vs 2019",style={"fontSize":"10px","color":th["muted"],"flex":"1"}),
-                      html.Span(impact_label,style={"fontSize":"10px","color":impact_color})],
+            html.Div([html.Span("2020 impact",style={"fontSize":"10px","color":th["muted"],"flex":"1"}),
+                      html.Span("COVID dip",style={"fontSize":"10px","color":th["amber"]})],
                      style={"display":"flex","padding":"5px 0"}),
         ]
         cagr_els = html.Div(rows)
@@ -3574,7 +3429,7 @@ def m_d5_layout():
                           style={"fontSize":"13px","width":"150px","backgroundColor":"#ffffff","color":"#111111","border":f"1px solid {th['border']}"}),
                   ])]),
         html.Div([
-            html.Div([m_card("MedTech Trade Map",[m_graph("m-d5-map",460)], info_id="MedTech Trade Map")],style={"flex":"1","minWidth":"0"}),
+            html.Div([m_card("MedTech Trade Map",[m_graph("m-d5-map",460)],info_id="m-d5-map")],style={"flex":"1","minWidth":"0"}),
             html.Div(id="m-d5-country-panel",style={"width":"230px","flexShrink":"0",
                 "background":th["card"],"border":f"1px solid {th['border']}",
                 "borderRadius":"8px","padding":"14px","overflowY":"auto","maxHeight":"500px"}),
@@ -3590,7 +3445,7 @@ def m_d5_layout():
     Output("m-d5-map","figure"), Output("m-d5-kpi","children"), Output("m-d5-country-panel","children"),
     Input("url","pathname"), Input("m-d5-year","value"), Input("m-d5-flow","value"))
 def cb_m_d5(pathname, year_val, flow):
-    th = THEMES[MSEC]; year = resolve_year(year_val, MT_CT_YMAX); flow = flow or "Both"
+    th = THEMES[MSEC]; years_list = resolve_years(year_val, [MT_CT_YMAX]); year = years_list if len(years_list)>1 else max(years_list); yr_label = f"{min(years_list)}" if len(set(years_list))==1 else f"{min(years_list)}-{max(years_list)}"; flow = flow or "Both"
     imp = mt_filter(year,'M','parent'); exp = mt_filter(year,'X','parent')
     IRELAND_LAT, IRELAND_LON = 53.35, -6.26
     fig = go.Figure()
@@ -3629,8 +3484,8 @@ def cb_m_d5(pathname, year_val, flow):
     if not exp.empty:
         ge=exp.groupby('partnerISO')['primaryValue'].sum(); top_exp=ge.idxmax(); top_exp_val=fmt_val(ge.max())
     kpi = html.Div([
-        m_kri("MedTech imports", fmt_val(imp["primaryValue"].sum()) if not imp.empty else "N/A","", th["c3"], f"Year {year}"),
-        m_kri("MedTech exports", fmt_val(exp["primaryValue"].sum()) if not exp.empty else "N/A","", th["accent"], f"Year {year}"),
+        m_kri("MedTech imports", fmt_val(imp["primaryValue"].sum()) if not imp.empty else "N/A","", th["c3"], f"Year {yr_label}"),
+        m_kri("MedTech exports", fmt_val(exp["primaryValue"].sum()) if not exp.empty else "N/A","", th["accent"], f"Year {yr_label}"),
         m_kri("Top export market", top_exp,"", th["c2"], top_exp_val),
         m_kri("Import partners", str(imp['partnerISO'].nunique()) if not imp.empty else "0","", th["accent2"], "Countries"),
     ], style={"display":"flex","gap":"12px"})
@@ -3654,7 +3509,7 @@ def cb_m_d5(pathname, year_val, flow):
     imp_rows = country_rows(imp,th["c3"],"IMPORTS") if flow in ("Both","M") else []
     exp_rows = country_rows(exp,th["accent"],"EXPORTS") if flow in ("Both","X") else []
     panel = html.Div([
-        html.Div([html.Span(f"Year {year}",style={"fontSize":"10px","color":th["text"],"fontWeight":"600"}),
+        html.Div([html.Span(f"Year {yr_label}",style={"fontSize":"10px","color":th["text"],"fontWeight":"600"}),
                   html.Span(" -- Trade Partners",style={"fontSize":"9px","color":th["muted"]})],
                  style={"marginBottom":"8px","paddingBottom":"6px","borderBottom":f"1px solid {th['border']}"}),
         *imp_rows,*exp_rows,
@@ -3680,11 +3535,9 @@ def m_d6_layout():
                           value=MT_PARTNERS[0] if MT_PARTNERS else "United States", clearable=False,
                           style={"fontSize":"13px","width":"200px","backgroundColor":"#ffffff","color":"#111111","border":f"1px solid {th['border']}"}),
                   ])]),
-        html.Div("Scenario assumes no short-term substitution from alternative suppliers. Real-world impact is typically lower as reshoring and rerouting mitigate some losses over 3-12 months.",
-                 style={"fontSize":"11px","color":th["muted"],"marginBottom":"8px","fontStyle":"italic"}),
         html.Div(id="m-d6-kri", style={"display":"flex","gap":"12px","marginBottom":"16px","flexWrap":"wrap"}),
-        row(m_card("Supply lost by sector if country removed (%)",[m_graph("m-d6-bar",280)], flex="2", info_id="Supply lost by sector if country removed (%)"),
-            m_card("Top alternative suppliers",[html.Div(id="m-d6-alts")], flex="1", info_id="Top alternative suppliers")),
+        row(m_card("Supply lost by sector if country removed (%)",[m_graph("m-d6-bar",280)], flex="2",info_id="m-d6-bar"),
+            m_card("Top alternative suppliers",[html.Div(id="m-d6-alts")], flex="1")),
         raw_data_section("m-d6",[
             ("Parent Code Imports", mt_ct[(mt_ct['codeType']=='parent')&(mt_ct['flowCode']=='M')].head(500) if not mt_ct.empty else None,
              ["refYear","partnerISO","cmdCode","hsLabel","primaryValue"]),
@@ -3695,7 +3548,7 @@ def m_d6_layout():
     Output("m-d6-kri","children"), Output("m-d6-bar","figure"), Output("m-d6-alts","children"),
     Input("url","pathname"), Input("m-d6-year","value"), Input("m-d6-country","value"))
 def cb_m_d6(pathname, year_val, country):
-    th = THEMES[MSEC]; year = resolve_year(year_val, MT_CT_YMAX)
+    th = THEMES[MSEC]; years_list = resolve_years(year_val, [MT_CT_YMAX]); year = years_list if len(years_list)>1 else max(years_list); yr_label = f"{min(years_list)}" if len(set(years_list))==1 else f"{min(years_list)}-{max(years_list)}"
     if not country: country = "United States"
     imp = mt_filter(year,'M','parent')
     if imp.empty: return [],go.Figure(),html.P("No data")
@@ -3835,21 +3688,14 @@ def m_d7_layout():
                     slider_row("Disruption Severity (%)","m-d7-sev",0,100,1,75,"%"),
                     slider_row("Demand Surge Factor","m-d7-dem",1.0,3.0,0.1,1.4,"x"),
                     slider_row("Monte Carlo Iterations","m-d7-iters",100,2000,100,1000,""),
-                ], info_id="Scenario Parameters"),
+                ]),
                 html.Div(id="m-d7-kpi",style={"display":"flex","gap":"12px","marginTop":"12px","flexWrap":"wrap"}),
             ], style={"flex":"1"}),
-            m_card("Potential Loss Distribution",[m_graph("m-d7-hist",300)], flex="2", info_id="VaR Distribution"),
+            m_card("VaR Distribution",[m_graph("m-d7-hist",300)], flex="2",info_id="m-d7-hist"),
         ),
-        row(m_card("12-Month Impact Timeline",[m_graph("m-d7-tl",220)], flex="1", info_id="12-Month Impact Timeline"),
-            m_card("Impact by MedTech Sector",[m_graph("m-d7-prod",220)], flex="1", info_id="Impact by MedTech Sector")),
-        m_card("Percentile Summary Table",[html.Div(id="m-d7-ptbl")], info_id="Percentile Summary Table"),
-        html.Div("Scenario assumes no short-term substitution from alternative suppliers. Real-world impact is typically lower as reshoring and rerouting mitigate some losses over 3-12 months.",
-                 style={"fontSize":"11px","color":th["muted"],"marginTop":"12px","fontStyle":"italic","textAlign":"center"}),
-        raw_data_section("m-d7",[
-            ("MedTech Imports (base for Monte Carlo)",
-             mt_ct[(mt_ct['codeType']=='parent')&(mt_ct['flowCode']=='M')].head(500) if not mt_ct.empty else None,
-             ["refYear","partnerISO","cmdCode","hsLabel","primaryValue"]),
-        ]),
+        row(m_card("12-Month Impact Timeline",[m_graph("m-d7-tl",220)], flex="1",info_id="m-d7-tl"),
+            m_card("Impact by MedTech Sector",[m_graph("m-d7-prod",220)], flex="1",info_id="m-d7-prod")),
+        m_card("Percentile Summary Table",[html.Div(id="m-d7-ptbl")]),
     ])
 
 @app.callback(Output("m-d7-sev-out","children"),Input("m-d7-sev","value"))
@@ -3903,7 +3749,7 @@ def cb_m_d7(severity, demand, iters, distype, scope):
             annotation_text=f"{lbl}: EUR {val:.2f}bn",annotation_position="top",
             annotation_font=dict(color=col,size=10))
     themed_layout(fig_h,MSEC,True)
-    fig_h.update_xaxes(title=dict(text=f"Potential Loss (EUR Billion) | n={n:,} iterations",font=dict(color=th["muted"],size=11),standoff=12))
+    fig_h.update_xaxes(title=dict(text=f"Value at Risk (EUR Billion) | n={n:,} iterations",font=dict(color=th["muted"],size=11),standoff=12))
     fig_h.update_yaxes(title=dict(text="Number of Simulations",font=dict(color=th["muted"],size=11),standoff=12))
 
     months = list(range(1,13)); np.random.seed(42)
@@ -3914,7 +3760,7 @@ def cb_m_d7(severity, demand, iters, distype, scope):
     themed_layout(fig_tl,MSEC,True)
     fig_tl.update_xaxes(title=dict(text="Month After Disruption",font=dict(color=th["muted"],size=11),standoff=12),
                          tickvals=months,ticktext=[f"M{m}" for m in months])
-    fig_tl.update_yaxes(title=dict(text="Cumulative Potential Loss (EUR bn)",font=dict(color=th["muted"],size=11),standoff=12))
+    fig_tl.update_yaxes(title=dict(text="Cumulative VaR (EUR bn)",font=dict(color=th["muted"],size=11),standoff=12))
     fig_tl.update_layout(legend=dict(orientation="h",y=-0.30,x=0,bgcolor="rgba(0,0,0,0)",font=dict(size=11)))
 
     # Impact by MedTech sector
@@ -3936,13 +3782,13 @@ def cb_m_d7(severity, demand, iters, distype, scope):
     fig_p.update_yaxes(title=dict(text="MedTech Sector",font=dict(color=th["muted"],size=11),standoff=12))
 
     ptbl = dash_table.DataTable(
-        data=[{"Percentile":l,"Potential Loss":f"EUR {v:.3f}bn","Interpretation":i} for l,v,i in
+        data=[{"Percentile":l,"Value at Risk":f"EUR {v:.3f}bn","Interpretation":i} for l,v,i in
               [("P5 (Best Case)",p5,"Only 5% of scenarios are lower"),
                ("P25 (Lower Quartile)",p25,"25% of scenarios are lower"),
                ("P50 (Median)",p50,"Most likely outcome -- central estimate"),
                ("P75 (Upper Quartile)",p75,"75% of scenarios are lower"),
                ("P95 (Worst Case)",p95,"Only 5% of scenarios are worse")]],
-        columns=[{"name":c,"id":c} for c in ["Percentile","Potential Loss","Interpretation"]],
+        columns=[{"name":c,"id":c} for c in ["Percentile","Value at Risk","Interpretation"]],
         style_header={"backgroundColor":"#221638","color":th["text"],"fontWeight":"600","fontSize":"12px","border":f"1px solid {th['border']}"},
         style_cell={"padding":"10px 14px","fontSize":"12px","fontFamily":"Inter,Segoe UI,Arial",
                     "backgroundColor":th["card"],"color":th["text"],"border":f"1px solid {th['border']}"},
@@ -3967,10 +3813,10 @@ def m_d8_layout():
                             "padding":"8px 12px","marginBottom":"12px"}),
         ]),
         html.Div(id="m-d8-kri", style={"display":"flex","gap":"12px","marginBottom":"16px","flexWrap":"wrap"}),
-        row(m_card("Export value by product (sub-codes)",[m_graph("m-d8-exp-bar",260)], flex="1", info_id="Export value by product (sub-codes)"),
-            m_card("Import value by product (sub-codes)",[m_graph("m-d8-imp-bar",260)], flex="1", info_id="Import value by product (sub-codes)")),
-        row(m_card("HHI per product (sub-codes, imports)",[m_graph("m-d8-hhi",240)], flex="1", info_id="HHI per product (sub-codes, imports)"),
-            m_card("Top import source per product",[html.Div(id="m-d8-sources")], flex="1", info_id="Top import source per product")),
+        row(m_card("Export value by product (sub-codes)",[m_graph("m-d8-exp-bar",260)], flex="1",info_id="m-d8-exp-bar"),
+            m_card("Import value by product (sub-codes)",[m_graph("m-d8-imp-bar",260)], flex="1",info_id="m-d8-imp-bar")),
+        row(m_card("HHI per product (sub-codes, imports)",[m_graph("m-d8-hhi",240)], flex="1",info_id="m-d8-hhi"),
+            m_card("Top import source per product",[html.Div(id="m-d8-sources")], flex="1")),
         raw_data_section("m-d8",[
             ("Sub-Code Exports", mt_ct[(mt_ct['codeType']=='sub')&(mt_ct['flowCode']=='X')].head(500) if not mt_ct.empty else None,
              ["refYear","partnerISO","cmdCode","hsLabel","primaryValue"]),
@@ -3984,7 +3830,7 @@ def m_d8_layout():
     Output("m-d8-imp-bar","figure"), Output("m-d8-hhi","figure"), Output("m-d8-sources","children"),
     Input("url","pathname"), Input("m-d8-year","value"))
 def cb_m_d8(pathname, year_val):
-    th = THEMES[MSEC]; year = resolve_year(year_val, MT_CT_YMAX)
+    th = THEMES[MSEC]; years_list = resolve_years(year_val, [MT_CT_YMAX]); year = years_list if len(years_list)>1 else max(years_list); yr_label = f"{min(years_list)}" if len(set(years_list))==1 else f"{min(years_list)}-{max(years_list)}"
     exp_s = mt_filter(year,'X','sub'); imp_s = mt_filter(year,'M','sub')
     PAL = [th["c1"],th["c2"],th["c3"]]
 
@@ -3992,7 +3838,7 @@ def cb_m_d8(pathname, year_val):
         m_kri("Catheters exports", fmt_val(exp_s[exp_s['cmdCode']=='901839']['primaryValue'].sum()),"", th["c1"], "HS 901839"),
         m_kri("Other Instruments exp", fmt_val(exp_s[exp_s['cmdCode']=='901890']['primaryValue'].sum()),"", th["c2"], "HS 901890"),
         m_kri("Cardiovascular exp", fmt_val(exp_s[exp_s['cmdCode']=='902190']['primaryValue'].sum()),"", th["c3"], "HS 902190"),
-        m_kri("Total sub-code exports", fmt_val(exp_s['primaryValue'].sum()),"", th["accent"], f"Sub-codes {year}"),
+        m_kri("Total sub-code exports", fmt_val(exp_s['primaryValue'].sum()),"", th["accent"], f"Sub-codes {yr_label}"),
     ], style={"display":"flex","gap":"12px","flexWrap":"wrap"})
 
     def product_bar(df, title, palette):
@@ -4053,19 +3899,7 @@ def cb_m_d8(pathname, year_val):
         ],style={"marginBottom":"10px","paddingBottom":"8px","borderBottom":f"1px solid {th['border']}"}))
     return cards, fig_exp, fig_imp, fig_hhi, html.Div(source_els)
 
-make_raw_toggle("e-d7-raw-toggle-btn","e-d7-raw-panel","e-d7-raw-content","e-d7-raw-source-tabs",[
-    ("Comtrade Imports (base for Monte Carlo)",
-     comtrade[(comtrade["refyear"]==CT_YEAR_MAX)&(comtrade["flowcode"]=="M")].head(500) if not comtrade.empty else None,
-     ["refyear","partnerdesc","cmddesc","primaryvalue"]),
-    ("SEAI Imports",
-     seai[seai["flow"]=="Imports"].head(200) if not seai.empty else None,
-     ["year","flow","oil","natural_gas","electricity","total"]),
-])
-make_raw_toggle("m-d7-raw-toggle-btn","m-d7-raw-panel","m-d7-raw-content","m-d7-raw-source-tabs",[
-    ("MedTech Imports (base for Monte Carlo)",
-     mt_ct[(mt_ct['codeType']=='parent')&(mt_ct['flowCode']=='M')].head(500) if not mt_ct.empty else None,
-     ["refYear","partnerISO","cmdCode","hsLabel","primaryValue"]),
-])
+make_raw_toggle("m-d7-raw-toggle-btn","m-d7-raw-panel","m-d7-raw-content","m-d7-raw-source-tabs",[])
 make_raw_toggle("m-d8-raw-toggle-btn","m-d8-raw-panel","m-d8-raw-content","m-d8-raw-source-tabs",[
     ("Sub-Code Exports", mt_ct[(mt_ct['codeType']=='sub')&(mt_ct['flowCode']=='X')].head(500) if not mt_ct.empty else None,
      ["refYear","partnerISO","cmdCode","hsLabel","primaryValue"]),
